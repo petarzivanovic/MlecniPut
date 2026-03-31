@@ -1,0 +1,6 @@
+serviceAccountKey.json
+.venv/
+data/*.json
+.env
+frontend/node_modules/
+src/__pycache__/
