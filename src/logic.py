@@ -1,4 +1,81 @@
 from geopy.distance import geodesic
+from datetime import datetime
+today = datetime.now().date()
+from geopy.distance import great_circle
+#definisemo centrove grada 
+belgrade = (44.7866, 20.4489)
+nis = (43.3209, 21.8954)
+novi_sad = (45.2396, 19.8227)
+radius = 92
+MIN_PROFIT=1500
+NABAVNA_CENA=80
+PDV=0.1
+GORIVO=35
+PRODAJNA_CENA=180
+
+def filtriraj_narudzbine(orders):
+    buyers_belgrade = []
+    buyers_nis = []
+    buyers_novi_sad = []
+
+    for doc in orders:
+        orders_data=doc.to_dict()
+        orders_data["order_id"]=doc.id
+        order_timestamp = orders_data.get("date_of_order")
+        address_of_buyer = orders_data.get("address_of_buyer")
+        if order_timestamp:
+            # Ako je u bazi Timestamp, on već ima metodu .date()
+            # Ako je slučajno string, moraćemo prvo da ga konvertujemo (vidi ispod)
+            try:
+                order_date = order_timestamp.date()
+            except AttributeError:
+                # U slucaju da je ipak ostao string u nekom dokumentu
+                #prilagodi format "March 28, 2003"
+                order_date =  datetime.strptime(order_timestamp.split(" at")[0], "%B %d, %Y").date()
+            if order_date == today:
+                if is_within_radius(*address_of_buyer, *belgrade,92):
+                    buyers_belgrade.append(orders_data) 
+                elif is_within_radius(*address_of_buyer, *nis,92):
+                    buyers_nis.append(orders_data)
+                elif is_within_radius(*address_of_buyer, *novi_sad,92):
+                    buyers_novi_sad.append(orders_data)      
+    
+    return {
+        "beograd":buyers_belgrade,
+        "nis": buyers_nis,
+        "novi_sad": buyers_novi_sad
+        
+    }
+
+def filtriraj_farmere(farmers):
+    farmers_belgrade = []
+    farmers_nis = []
+    farmers_novi_sad = []
+    
+    for doc in farmers:
+        farmers_data = doc.to_dict()
+        address_of_farm = farmers_data.get("location")
+        if is_within_radius(*address_of_farm, *belgrade,92):
+            farmers_belgrade.append(farmers_data) 
+        elif is_within_radius(*address_of_farm, *nis,92):
+            farmers_nis.append(farmers_data)
+        elif is_within_radius(*address_of_farm, *novi_sad,92):
+            farmers_novi_sad.append(farmers_data)
+    return {
+        "beograd":farmers_belgrade,
+        "nis": farmers_nis,
+        "novi_sad": farmers_novi_sad
+    }
+        
+
+# Proveravamo kome gradu pripada porudzbina
+def is_within_radius(lat, lon, center_lat, center_lon, radius_km):
+    center = (center_lat, center_lon)
+    target = (lat, lon)
+    # great_circle calculates the distance over a spherical earth
+    distance = great_circle(center, target).km
+    
+    return distance <= radius_km
 
 def izracunaj_udaljenost(tacka_a, tacka_b):
     """_summary_
@@ -11,16 +88,13 @@ def izracunaj_udaljenost(tacka_a, tacka_b):
 
 def proveri_isplativost(litri,km):
     """Da li nam se isplati da palimo kamion"""
-    a = 180  #prodajna cena
-    b= a*0.9 #pare nakon PDV-a
-    c= b- 80 #pare nakon sto oduzmemo nabavnu cenu mleka
-    trosak_po_km=35 #Gorivo + amortizacija 
-    zarada_po_litru = c
+    zarada_po_litru=PRODAJNA_CENA*(1-PDV)-NABAVNA_CENA
+    trosak_po_km=GORIVO
     
     ukupna_zarada= litri*zarada_po_litru
     ukupni_trosak= km*trosak_po_km
     
     # Ako je zarada veca od troska vracamo True
-    return (ukupna_zarada - ukupni_trosak)>1500
+    return (ukupna_zarada - ukupni_trosak)>MIN_PROFIT
     
     
