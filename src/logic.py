@@ -2,6 +2,7 @@ from geopy.distance import geodesic
 from datetime import datetime
 today = datetime.now().date()
 from geopy.distance import great_circle
+import ai_engine
 #definisemo centrove grada 
 belgrade = (44.7866, 20.4489)
 nis = (43.3209, 21.8954)
@@ -41,7 +42,7 @@ def filtriraj_narudzbine(orders):
                     buyers_novi_sad.append(orders_data)      
     
     return {
-        "beograd":buyers_belgrade,
+        "belgrade":buyers_belgrade,
         "nis": buyers_nis,
         "novi_sad": buyers_novi_sad
         
@@ -62,7 +63,7 @@ def filtriraj_farmere(farmers):
         elif is_within_radius(*address_of_farm, *novi_sad,92):
             farmers_novi_sad.append(farmers_data)
     return {
-        "beograd":farmers_belgrade,
+        "belgrade":farmers_belgrade,
         "nis": farmers_nis,
         "novi_sad": farmers_novi_sad
     }
@@ -97,4 +98,22 @@ def proveri_isplativost(litri,km):
     # Ako je zarada veca od troska vracamo True
     return (ukupna_zarada - ukupni_trosak)>MIN_PROFIT
     
+def posalji_rutu(city_centers,ordered_orders,ordered_farmers):
+    routes = {}
+    for city, coordinates in city_centers.items():
+        buyers = ordered_orders[city]
+        farmers = ordered_farmers[city]
+
+        if buyers and farmers:
+            print(f"\n Generišem rutu za {city.upper()}...")
+
+            # Pozivamo AI engine za taj specifičan grad
+            route = ai_engine.generisi_rutu(coordinates, farmers, buyers)
+
+            print(f" Ruta za {city.upper()} spremna!")
+            routes[city] = route
+        else:
+            print(f"\n Za {city.upper()} danas nema dovoljno podataka")
+            routes[city]=None
+    return routes
     

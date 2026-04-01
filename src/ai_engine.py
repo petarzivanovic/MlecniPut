@@ -31,8 +31,17 @@ def generisi_rutu(base_city, farmers, buyers):
     }}
     """
     response = model.generate_content(prompt)
-    #Cistimo odgovor od markdowna ako ga AI doda
-    return response.text.replace('```json','').replace('```','').strip
+    text_response = response.text
+    if "```json" in text_response:
+        text_response=text_response.split("```json")[1].split("```")[0].strip()
+    elif "```" in text_response:
+        text_response=text_response.split("```")[1].split("```").strip()
+    try:
+        # Pretvaramo string u pravi Python recnik (dict)
+        return json.loads(text_response)
+    except Exception as e:
+        print("Greska pri parsiranju AI odgovora: {e}")
+        return None
 
 
 
