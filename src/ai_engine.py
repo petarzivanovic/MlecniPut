@@ -62,7 +62,7 @@ def generisi_rutu(base_city, farmers, buyers, attempt=0):
     prompt = f"""
     You are dispatcher for Mlečni Put milk delivery.
     BASE: {base_city} (start and end point).
-    TRUCK_CAPACITY: 500L (maximum milk the truck can carry).
+    TRUCK_CAPACITY:1500L (maximum milk the truck can carry).
     
     FARMERS(SELLERS): {json.dumps(cisti_farmers)} (each has 'available_milk' – balance pickups to help small producers).
     BUYERS(ORDERS): {json.dumps(cisti_buyers)} (each has 'milk_liters' – deliver to all if possible).
@@ -74,7 +74,7 @@ def generisi_rutu(base_city, farmers, buyers, attempt=0):
     - Minimum profit: 1500 RSD per route.
     
     TASK:
-    Generate the most profitable route starting and ending at BASE. Pickup milk from different farmers (our purpouse is to help every farmer sell their milk), deliver to ALL buyers if capacity allows. Calculate total profit: (sales revenue - purchase cost - fuel cost). If profit < 1500, mark as 'low'.
+    Generate the most profitable route starting and ending at BASE, while looking to pickup milk from different farmers (our purpouse is to help every farmer sell their milk), deliver to ALL buyers if capacity allows. Calculate total profit: (sales revenue - purchase cost - fuel cost). If profit < 1500, mark as 'low'.
     
     RETURN ANSWER ONLY AS JSON:
     {{
