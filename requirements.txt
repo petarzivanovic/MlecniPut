@@ -5,3 +5,4 @@ pandas
 prophet
 ortools
 python-dotenv
+pip freeze > requirements.txt
