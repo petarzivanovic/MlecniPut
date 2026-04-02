@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+supabase
+pandas
+prophet
+ortools
