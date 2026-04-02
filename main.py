@@ -18,7 +18,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # 3. Dozvoljavamo tvom sajtu (Lovable) da priča sa Pythonom
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=["https://protivmlecnogpraha.lovable.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
