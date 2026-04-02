@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import logic
 import ai_engine
 import db_manager
+import time
 # Učitavamo .env
 load_dotenv()
 #definisemo centrove grada
@@ -28,7 +29,7 @@ print("--- USPEŠNO POVEZANO SA MLEKOPUT BAZOM ---")
 
 # 0 Uzimamo orders za ovaj dan
 orders_ref = db.collection("orders")
-orders= orders_ref.stream()
+orders= orders_ref.where("status", "==", "pending").stream()
 ordered_orders = logic.filtriraj_narudzbine(orders)
 
         
@@ -49,6 +50,7 @@ print ("\n --- AI ANALIZA PROFITA PO FARMAMA ---")
 routes = logic.posalji_rutu(city_centers, ordered_orders, ordered_farmers)
 for city in city_centers:
     db_manager.sacuvaj_rutu_u_bazu(city, routes[city])
+    logic.azuriraj_stanje_mleka_u_bazi(routes[city])
 
 
 

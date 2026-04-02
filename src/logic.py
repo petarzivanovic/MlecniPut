@@ -3,6 +3,9 @@ from datetime import datetime
 today = datetime.now().date()
 from geopy.distance import great_circle
 import ai_engine
+import firebase_admin
+from firebase_admin import credentials, firestore
+db = firestore.client(database_id="ai-studio-a689d4b3-aea7-455a-bd08-676f8a2e1c48")
 #definisemo centrove grada 
 belgrade = (44.7866, 20.4489)
 nis = (43.3209, 21.8954)
@@ -55,6 +58,7 @@ def filtriraj_farmere(farmers):
     
     for doc in farmers:
         farmers_data = doc.to_dict()
+        farmers_data["id"] = doc.id  # Dodaj ID dokumenta
         address_of_farm = farmers_data.get("location")
         if is_within_radius(*address_of_farm, *belgrade,92):
             farmers_belgrade.append(farmers_data) 
@@ -109,7 +113,11 @@ def posalji_rutu(city_centers,ordered_orders,ordered_farmers):
 
             # Pozivamo AI engine za taj specifičan grad
             route = ai_engine.generisi_rutu(coordinates, farmers, buyers)
-
+            for buyer in buyers:
+                try:
+                    db.collection("orders").document(buyer['order_id']).update({"status": "assigned"})
+                except Exception as e:
+                    print(f"Greška pri update-u order-a {buyer['order_id']}: {e}")
             print(f" Ruta za {city.upper()} spremna!")
             routes[city] = route
         else:
@@ -117,3 +125,37 @@ def posalji_rutu(city_centers,ordered_orders,ordered_farmers):
             routes[city]=None
     return routes
     
+def azuriraj_stanje_mleka_u_bazi(route_data):
+    """
+    Prolazi kroz generisanu rutu i oduzima litre od farmera u Firebase-u.
+    """
+    
+    if not route_data or 'delivery_order' not in route_data:
+        print("⚠️ Nema podataka za ažuriranje.")
+        return
+
+    for stop in route_data['delivery_order']:
+        doc_id = stop.get('id')
+        liters = stop.get('liters', 0)
+        stop_type = stop.get('type')
+
+        if not doc_id or liters <= 0:
+            continue
+
+        try:
+            if stop_type == 'farmer':
+                # Oduzimamo od dostupnog mleka (Increment sa minusom)
+                print(f"🚜 Farmer {stop['name']}: Oduzimam {liters}L")
+                db.collection("sellers").document(doc_id).update({
+                    "total_stock": firestore.Increment(-liters)
+                })
+            
+            elif stop_type == 'buyer':
+                # Opciono: Možeš i kupcima da smanjiš potražnju ili promeniš status
+                print(f"🚛 Kupac {stop['name']}: Isporučeno {liters}L")
+                db.collection("orders").document(doc_id).update({
+                    "status": "completed",
+                    "delivered_liters": liters
+                })
+        except Exception as e:
+            print(f"❌ Greška pri ažuriranju dokumenta {doc_id}: {e}")

@@ -54,6 +54,27 @@ def add_test_data():
         db.collection("buyers").add(b)
         print(f"Dodat kupac: {b['display_name']}")
 
-if __name__ == "__main__":
-    add_test_data()
-    print("\n--- SVI TESTNI PODACI SU USPEŠNO UPISANI U FIREBASE ---")
+def add_test_orders():
+    # 4. DODAJEMO TEST ORDERS (NARUDZBINE) ZA DANAS
+    import datetime
+    today = datetime.datetime.now().date()
+    new_orders = [
+        {
+            "address_of_buyer": [44.8194, 20.4074],  # Novi Beograd
+            "date_of_order": firestore.SERVER_TIMESTAMP,  # Današnji datum
+            "milk_liters": 100,
+            "order_id": "test_order_1",
+            "status": "assigned",
+        },
+        {
+            "address_of_buyer": [44.8012, 20.5055],  # Zvezdara
+            "date_of_order": firestore.SERVER_TIMESTAMP,
+            "milk_liters": 80,
+            "order_id": "test_order_2",
+            "status": "assigned",
+        }
+    ]
+
+    for o in new_orders:
+        db.collection("orders").add(o)
+        print(f"Dodata narudžbina: {o['order_id']}")
