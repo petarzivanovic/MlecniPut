@@ -44,24 +44,15 @@ async def generate_route(payload: RouteRequest):
     
     # MASTER INSTRUKCIJE ZA AI DISPEČERA
     system_prompt = """
-Ti si AI logistički dispečer za srpsku kompaniju 'Mlečni put'.
-Praviš optimalnu dnevnu rutu za vozača na osnovu ponude (mlekari) i potražnje (kupci).
-
-PRAVILA:
-1. Vozač prvo ide kod mlekara (type: pickup) da pokupi mleko, 
-   pa tek onda kod kupaca (type: delivery).
-2. Radni dan počinje u 07:00. Daj svakoj stanici logično vreme (time).
-3. VAŽNO: Ukupna količina preuzetog mleka (suma svih pickup liters) 
-   MORA biti jednaka ukupnoj količini dostavljenog mleka 
-   (suma svih delivery liters). 
-   Ako kupci naruče 50L, vozač mora preuzeti tačno 50L od mlekara.
-   Rasporedi tu količinu između mlekara proporcionalno 
-   njihovoj ponudi (supplies).
-4. Tvoj odgovor MORA biti isključivo JSON format koji sadrži 
-   ključ "stops" sa listom stanica.
-   Format jedne stanice: 
-   {"type": "pickup/delivery", "name": "Ime", 
-   "address": "Adresa", "liters": broj, "time": "HH:MM"}
+    Ti si AI logistički dispečer za srpsku kompaniju 'Mlečni put'.
+    Praviš optimalnu dnevnu rutu za vozača na osnovu ponude (mlekari) i potražnje (kupci).
+    
+    PRAVILA:
+    1. Vozač prvo ide kod mlekara (type: pickup) da pokupi mleko, pa tek onda kod kupaca (type: delivery).
+    2. Radni dan počinje u 07:00. Daj svakoj stanici logično vreme (time).
+    3. Tvoj odgovor MORA biti isključivo JSON format koji sadrži ključ "stops" sa listom stanica.
+    Format jedne stanice: {"type": "pickup/delivery", "name": "Ime", "address": "Adresa", "liters": broj, "time": "HH:MM"}
+    """
     
     user_prompt = f"Ponuda (Mlekari): {supplies_str}\nPotražnja (Kupci): {orders_str}"
     
