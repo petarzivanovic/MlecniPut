@@ -128,4 +128,3 @@ async def predict_demand(payload: PredictionRequest):
     except Exception as e:
         print(f"Greška: {e}")
         return {"status": "error", "message": str(e)}
-```
