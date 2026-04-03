@@ -79,3 +79,53 @@ async def generate_route(payload: RouteRequest):
     except Exception as e:
         print(f"Greška: {e}")
         return {"status": "error", "message": str(e)}
+
+
+#nvo
+
+class PredictionRequest(BaseModel):
+    subscriptions: List[Dict[str, Any]]
+    orders: List[Dict[str, Any]]
+
+@app.post("/api/predict-demand")
+async def predict_demand(payload: PredictionRequest):
+    print("--- AI PRAVI PREDIKCIJU POTRAŽNJE ---")
+    
+    subs_str = json.dumps(payload.subscriptions, ensure_ascii=False)
+    orders_str = json.dumps(payload.orders, ensure_ascii=False)
+    
+    system_prompt = """
+    Ti si AI analitičar za srpsku kompaniju 'Mlečni put'.
+    Na osnovu aktivnih pretplata i jednokratnih narudžbina,
+    napravi predikciju potražnje za narednih 7 dana.
+    
+    Tvoj odgovor MORA biti isključivo JSON sa ovim ključevima:
+    {
+      "weekly_forecast": [
+        {"day": "Ponedeljak", "liters": broj, "trend": "visok/srednji/nizak"}
+      ],
+      "peak_day": "naziv dana",
+      "farmer_message": "Poruka mlekaru na srpskom - koji dan i koliko litara",
+      "customer_message": "Marketinška poruka kupcima na srpskom"
+    }
+    """
+    
+    user_prompt = f"Aktivne pretplate: {subs_str}\nJednokratne narudžbine: {orders_str}"
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+        )
+        
+        result = json.loads(response.choices[0].message.content)
+        return {"status": "success", "prediction": result}
+        
+    except Exception as e:
+        print(f"Greška: {e}")
+        return {"status": "error", "message": str(e)}
+```
