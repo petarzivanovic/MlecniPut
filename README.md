@@ -67,6 +67,6 @@ OPENAI_API_KEY=tvoj_kljuc
 | POST | `/api/generate-route` | AI generiše optimalnu dnevnu rutu za vozača |
 | POST | `/api/predict-demand` | AI predviđa potražnju za sledeću nedelju |
 
-## 👥 Tim
+## 👥 Tim Lucidni
 
 Projekat rađen u okviru **FON Hakatona 2026**.
