@@ -1,0 +1,184 @@
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;0,900;1,400;1,700;1,900&family=Caveat:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 45 33% 97%;
+    --foreground: 0 0% 7%;
+
+    --card: 45 33% 97%;
+    --card-foreground: 0 0% 7%;
+
+    --popover: 45 33% 97%;
+    --popover-foreground: 0 0% 7%;
+
+    --primary: 45 90% 63%;
+    --primary-foreground: 0 0% 7%;
+
+    --secondary: 120 25% 30%;
+    --secondary-foreground: 45 33% 97%;
+
+    --muted: 45 20% 90%;
+    --muted-foreground: 0 0% 40%;
+
+    --accent: 120 35% 25%;
+    --accent-foreground: 45 33% 97%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 45 15% 82%;
+    --input: 45 15% 82%;
+    --ring: 45 90% 63%;
+
+    --radius: 0.75rem;
+
+    --cream: 45 33% 97%;
+    --yellow: 45 90% 63%;
+    --yellow-bright: 48 96% 60%;
+    --earth-green: 120 25% 30%;
+    --earth-green-light: 120 20% 45%;
+    --ink: 0 0% 7%;
+    --warm-white: 40 40% 96%;
+
+    --font-display: 'Playfair Display', Georgia, serif;
+    --font-handwritten: 'Caveat', cursive;
+    --font-body: 'Inter', system-ui, sans-serif;
+    --font-data: 'Space Grotesk', system-ui, sans-serif;
+
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html, body {
+    overflow-x: hidden;
+  }
+
+  body {
+    @apply bg-background text-foreground font-body;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-display);
+  }
+}
+
+@layer components {
+  .font-display {
+    font-family: var(--font-display);
+  }
+  
+  .font-handwritten {
+    font-family: var(--font-handwritten);
+  }
+
+  .font-body {
+    font-family: var(--font-body);
+  }
+
+  .font-data {
+    font-family: var(--font-data);
+  }
+
+  .text-ink {
+    color: hsl(var(--ink));
+  }
+
+  .bg-cream {
+    background-color: hsl(var(--cream));
+  }
+
+  .bg-earth-green {
+    background-color: hsl(var(--earth-green));
+  }
+
+  .text-earth-green {
+    color: hsl(var(--earth-green));
+  }
+
+  .bg-yellow-brand {
+    background-color: hsl(var(--yellow));
+  }
+
+  .text-yellow-brand {
+    color: hsl(var(--yellow));
+  }
+
+  .bg-warm-white {
+    background-color: hsl(var(--warm-white));
+  }
+
+  .glass-card {
+    background: rgba(255, 255, 255, 0.15);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+  }
+
+  .marker-underline {
+    background-image: linear-gradient(
+      transparent 60%,
+      hsl(var(--yellow) / 0.5) 60%
+    );
+    background-size: 100% 100%;
+    padding-bottom: 2px;
+  }
+
+  .hero-text-shadow {
+    text-shadow: 0 2px 20px rgba(0, 0, 0, 0.5), 0 1px 6px rgba(0, 0, 0, 0.3);
+  }
+}
+
+@layer utilities {
+  .animate-float {
+    animation: float 3s ease-in-out infinite;
+  }
+
+  .animate-float-delayed {
+    animation: float 3s ease-in-out 1s infinite;
+  }
+
+  .animate-float-slow {
+    animation: float 4s ease-in-out 0.5s infinite;
+  }
+
+  .animate-wiggle {
+    animation: wiggle 2s ease-in-out infinite;
+  }
+
+  .animate-scribble {
+    animation: scribble 1.5s ease-in-out infinite alternate;
+  }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0px) rotate(0deg); }
+  50% { transform: translateY(-12px) rotate(2deg); }
+}
+
+@keyframes wiggle {
+  0%, 100% { transform: rotate(-3deg); }
+  50% { transform: rotate(3deg); }
+}
+
+@keyframes scribble {
+  0% { stroke-dashoffset: 0; }
+  100% { stroke-dashoffset: 20; }
+}
