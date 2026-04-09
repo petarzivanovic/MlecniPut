@@ -38,6 +38,80 @@ class PredictionRequest(BaseModel):
 
 
 # ─────────────────────────────────────────────
+# NORMALIZACIJA PODATAKA SA FRONTENDA
+# ─────────────────────────────────────────────
+
+def normalize_supply(s: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Frontend šalje: {id, name, address, capacity_liters_per_day, ...}
+    Backend očekuje: {name, address, liters}
+    """
+    liters = (
+        s.get("liters")                    # ako već postoji
+        or s.get("capacity_liters_per_day") # polje iz partner_applications
+        or s.get("capacity")               # alternativno ime
+        or 0
+    )
+    return {
+        "id":      s.get("id", ""),
+        "name":    s.get("name") or s.get("full_name") or "Nepoznat mlekar",
+        "address": s.get("address") or "",
+        "liters":  float(liters),
+    }
+
+
+def normalize_order(o: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Frontend šalje dve vrste:
+      subscription: {id, user_id, plan_type, weekly_liters, delivery_days, delivery_address, customer_name, type}
+      single_order: {id, user_id, delivery_date, items, delivery_address, customer_name, type}
+    Backend očekuje: {name, address, liters}
+    """
+    order_type = o.get("type", "")
+
+    # ── Ime kupca ──────────────────────────────
+    name = (
+        o.get("name")
+        or o.get("customer_name")
+        or "Nepoznat kupac"
+    )
+
+    # ── Adresa kupca ───────────────────────────
+    address = (
+        o.get("address")
+        or o.get("delivery_address")
+        or ""
+    )
+
+    # ── Litraža ────────────────────────────────
+    if order_type == "subscription":
+        weekly = float(o.get("weekly_liters") or o.get("liters") or 0)
+        delivery_days = o.get("delivery_days") or []
+        num_days = max(len(delivery_days), 1)   # koliko dana nedeljno se dostavlja
+        liters = weekly / num_days              # dnevna količina
+    elif order_type == "single_order":
+        # items može biti lista {product, quantity_liters} ili broj
+        items = o.get("items") or o.get("liters") or 0
+        if isinstance(items, list):
+            liters = sum(
+                float(item.get("quantity_liters") or item.get("liters") or item.get("quantity") or 0)
+                for item in items
+            )
+        else:
+            liters = float(items)
+    else:
+        liters = float(o.get("liters") or o.get("weekly_liters") or 0)
+
+    return {
+        "id":      o.get("id", ""),
+        "name":    name,
+        "address": address,
+        "liters":  round(liters, 1),
+        "type":    order_type,
+    }
+
+
+# ─────────────────────────────────────────────
 # GOOGLE HELPERS
 # ─────────────────────────────────────────────
 
@@ -247,8 +321,29 @@ async def generate_route(payload: RouteRequest):
     if not payload.orders:
         return {"status": "error", "message": "Nema narudžbina za ovaj dan."}
 
+    # ── KORAK 0: Normalizacija polja sa frontenda ─────────────────────────
+    # Frontend šalje drugačija imena polja — ovde mapiramo na ono što backend očekuje
+    raw_supplies = [normalize_supply(s) for s in payload.supplies]
+    raw_orders   = [normalize_order(o)  for o in payload.orders]
+
+    print(f"Normalizovani supplies: {json.dumps(raw_supplies, ensure_ascii=False)}")
+    print(f"Normalizovani orders:   {json.dumps(raw_orders,   ensure_ascii=False)}")
+
+    # Filtriramo stavke bez adrese
+    supplies_clean = [s for s in raw_supplies if s.get("address", "").strip()]
+    orders_clean   = [o for o in raw_orders   if o.get("address", "").strip()]
+
+    missing_addr_orders = [o["name"] for o in raw_orders if not o.get("address", "").strip()]
+    if missing_addr_orders:
+        print(f"Kupci bez adrese (preskoceni): {missing_addr_orders}")
+
+    if not supplies_clean:
+        return {"status": "error", "message": "Mlekari nemaju unesene adrese u sistemu."}
+    if not orders_clean:
+        return {"status": "error", "message": f"Kupci nemaju unesene adrese. Preskoceni: {missing_addr_orders}"}
+
     # ── KORAK 1: Balansiranje litara ──────────────────────────────────────
-    supplies, orders, balance_note = balance_liters(payload.supplies, payload.orders)
+    supplies, orders, balance_note = balance_liters(supplies_clean, orders_clean)
     print(f"Balans: {balance_note}")
 
     # ── KORAK 2: Geocodiranje svih adresa ─────────────────────────────────
