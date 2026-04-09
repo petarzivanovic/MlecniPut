@@ -12,7 +12,7 @@ load_dotenv()
 
 app = FastAPI()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+ORS_API_KEY = os.getenv("ORS_API_KEY")
 
 app.add_middleware(
     CORSMiddleware,
@@ -112,19 +112,31 @@ def normalize_order(o: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ─────────────────────────────────────────────
-# GOOGLE HELPERS
+# ORS HELPERS (OpenRouteService — besplatna alternativa Google Maps)
 # ─────────────────────────────────────────────
 
 def geocode_address(address: str) -> Optional[Dict]:
-    """Pretvara adresu u {lat, lng}. Vraća None ako ne uspe."""
-    url = "https://maps.googleapis.com/maps/api/geocode/json"
-    params = {"address": address + ", Srbija", "key": GOOGLE_API_KEY}
+    """
+    Pretvara adresu u {lat, lng} koristeći ORS Geocoding API.
+    Vraća None ako ne uspe.
+    """
+    url = "https://api.openrouteservice.org/geocode/search"
+    headers = {"Authorization": ORS_API_KEY}
+    params = {
+        "text":           address + ", Srbija",
+        "boundary.country": "RS",   # ograničavamo na Srbiju
+        "size":           1,
+    }
     try:
-        r = requests.get(url, params=params, timeout=5)
+        r = requests.get(url, headers=headers, params=params, timeout=5)
         data = r.json()
-        if data["status"] == "OK":
-            loc = data["results"][0]["geometry"]["location"]
-            return {"lat": loc["lat"], "lng": loc["lng"]}
+        features = data.get("features", [])
+        if features:
+            lng, lat = features[0]["geometry"]["coordinates"]
+            print(f"Geocoded '{address}' → lat={lat}, lng={lng}")
+            return {"lat": lat, "lng": lng}
+        else:
+            print(f"Geocoding: nema rezultata za '{address}'")
     except Exception as e:
         print(f"Geocoding greška za '{address}': {e}")
     return None
@@ -133,37 +145,51 @@ def geocode_address(address: str) -> Optional[Dict]:
 def get_distance_matrix(origins: List[Dict], destinations: List[Dict]) -> Optional[List[List[int]]]:
     """
     Vraća matricu putnih vremena u SEKUNDAMA između svih parova.
+    Koristi ORS Matrix API (driving-car profil).
     travel_times[i][j] = sekunde od origins[i] do destinations[j]
+    
+    ORS Matrix prima koordinate kao [[lng, lat], ...] — obrnuto od Google!
     """
-    def latlon(c):
-        return f"{c['lat']},{c['lng']}"
-
-    origins_str      = "|".join(latlon(c) for c in origins)
-    destinations_str = "|".join(latlon(c) for c in destinations)
-
-    url = "https://maps.googleapis.com/maps/api/distancematrix/json"
-    params = {
-        "origins":      origins_str,
-        "destinations": destinations_str,
-        "mode":         "driving",
-        "key":          GOOGLE_API_KEY,
+    url = "https://api.openrouteservice.org/v2/matrix/driving-car"
+    headers = {
+        "Authorization": ORS_API_KEY,
+        "Content-Type":  "application/json",
     }
+
+    # ORS očekuje [lng, lat] redosled
+    all_coords = [[c["lng"], c["lat"]] for c in origins + destinations]
+    n_origins  = len(origins)
+    n_total    = len(all_coords)
+
+    # sources = indeksi origins, destinations = indeksi destinations
+    sources      = list(range(n_origins))
+    destinations_idx = list(range(n_origins, n_total))
+
+    body = {
+        "locations":    all_coords,
+        "sources":      sources,
+        "destinations": destinations_idx,
+        "metrics":      ["duration"],
+    }
+
     try:
-        r = requests.get(url, params=params, timeout=10)
+        r = requests.post(url, headers=headers, json=body, timeout=15)
         data = r.json()
-        if data["status"] != "OK":
-            print(f"Distance Matrix greška: {data['status']}")
+
+        if "durations" not in data:
+            print(f"ORS Matrix greška: {data}")
             return None
 
-        matrix = []
-        for row in data["rows"]:
-            matrix.append([
-                el["duration"]["value"] if el["status"] == "OK" else 99999
-                for el in row["elements"]
-            ])
+        # durations[i][j] = sekunde od origins[i] do destinations[j]
+        matrix = [
+            [int(val) if val is not None else 99999 for val in row]
+            for row in data["durations"]
+        ]
+        print(f"ORS Matrix OK: {len(matrix)}x{len(matrix[0])} matrica")
         return matrix
+
     except Exception as e:
-        print(f"Distance Matrix exception: {e}")
+        print(f"ORS Matrix exception: {e}")
         return None
 
 
