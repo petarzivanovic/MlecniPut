@@ -204,6 +204,38 @@ def nearest_neighbor_order(coords: List[Dict], travel_matrix: List[List[int]]) -
 
 
 # ─────────────────────────────────────────────
+# SPAJANJE NARUDŽBINA ISTE OSOBE (ista adresa → jedan stop)
+# ─────────────────────────────────────────────
+
+def merge_orders_by_address(orders: list) -> list:
+    """
+    Ako isti kupac ima više narudžbina za isti dan (subscription + single_order,
+    ili više single_order-a), spajamo ih u jedan stop sa zbirnom litražom.
+    Grupišemo po (address.strip().lower()) — isti ključ = isti stop.
+    """
+    merged: dict = {}
+    for o in orders:
+        addr_key = (o.get("address") or "").strip().lower()
+        if not addr_key:
+            continue  # bez adrese se ne može ni geocodirati
+
+        if addr_key not in merged:
+            merged[addr_key] = dict(o)  # kopija prvog
+        else:
+            # Dodajemo litre na postojeći stop
+            merged[addr_key]["liters"] = round(
+                float(merged[addr_key].get("liters", 0)) + float(o.get("liters", 0)), 1
+            )
+            # Ako drugi zapis ima ime a prvi ne, koristimo koje god postoji
+            if not merged[addr_key].get("name"):
+                merged[addr_key]["name"] = o.get("name")
+
+    result = list(merged.values())
+    print(f"Merge: {len(orders)} narudžbina → {len(result)} jedinstvenih stanica")
+    return result
+
+
+# ─────────────────────────────────────────────
 # BALANS LITARA (Python matematika, ne AI)
 # ─────────────────────────────────────────────
 
@@ -342,8 +374,12 @@ async def generate_route(payload: RouteRequest):
     if not orders_clean:
         return {"status": "error", "message": f"Kupci nemaju unesene adrese. Preskoceni: {missing_addr_orders}"}
 
-    # ── KORAK 1: Balansiranje litara ──────────────────────────────────────
-    supplies, orders, balance_note = balance_liters(supplies_clean, orders_clean)
+    # ── KORAK 1: Spajamo narudžbine iste osobe pa balansiramo litre ─────────
+    orders_merged = merge_orders_by_address(orders_clean)
+    if not orders_merged:
+        return {"status": "error", "message": "Nema validnih narudžbina sa adresama."}
+
+    supplies, orders, balance_note = balance_liters(supplies_clean, orders_merged)
     print(f"Balans: {balance_note}")
 
     # ── KORAK 2: Geocodiranje svih adresa ─────────────────────────────────
@@ -419,7 +455,7 @@ async def generate_route(payload: RouteRequest):
     print("Gradim raspored vremena...")
 
     START_HOUR = 7
-    SERVICE_MIN = 15  # minuta za utovar/istovar po stanici
+    SERVICE_MIN = 5   # minuta za utovar/istovar po stanici (dostava mleka je brza)
     current_sec = START_HOUR * 3600
 
     def fmt(sec):
@@ -442,7 +478,7 @@ async def generate_route(payload: RouteRequest):
         current_sec += SERVICE_MIN * 60
         if step < len(pickup_order) - 1:
             travel_min = transit_pickup[step] if step < len(transit_pickup) else 20
-            current_sec += travel_min * 60
+            current_sec += travel_min * 60  # realno vreme od Google Distance Matrix
 
     # Tranzit od poslednjeg mlekara do prvog kupca
     current_sec += last_pickup_to_first_delivery * 60
