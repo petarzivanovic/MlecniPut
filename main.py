@@ -230,6 +230,82 @@ def nearest_neighbor_order(coords: List[Dict], travel_matrix: List[List[int]]) -
 
 
 # ─────────────────────────────────────────────
+# SELEKCIJA OPTIMALNIH MLEKARA
+# ─────────────────────────────────────────────
+
+def select_optimal_supplies(
+    supplies: list,
+    supply_coords: list,
+    delivery_coords: list,
+    total_demand: float,
+    supply_to_delivery_matrix: list,  # [supply_i][delivery_j] u sekundama
+) -> tuple[list, list]:
+    """
+    Bira minimalan optimalan podskup mlekara koji:
+    1. Zadovoljava ukupnu tražnju (total_demand litara)
+    2. Minimizuje ukupno putno vreme do kupaca
+    3. Ne uključuje mlekare sa 0L kapaciteta
+
+    Vraća (odabrani supplies, njihovi koordinati).
+
+    Logika:
+    - Svaki mlekar dobija "score" = prosečno vreme do svih kupaca (manji = bolji)
+    - Sortiramo mlekare po score-u (najbliži kupcima prvi)
+    - Pohlepno dodajemo mlekare dok ne pokrijemo tražnju
+    - Ako jedan mlekar pokriva sve → samo njega uzimamo
+    """
+    if not supplies:
+        return [], []
+
+    # Filtriramo mlekare bez kapaciteta
+    valid = [
+        (i, s, supply_coords[i])
+        for i, s in enumerate(supplies)
+        if float(s.get("liters", 0)) > 0
+    ]
+
+    if not valid:
+        print("Selekcija: nema mlekara sa dostupnim litrama!")
+        return [], []
+
+    # Score = prosečno putno vreme do svih kupaca (sekunde)
+    # Manji score = mlekar bliži kupcima = bolji izbor
+    def avg_time_to_customers(supply_idx: int) -> float:
+        if not supply_to_delivery_matrix or supply_idx >= len(supply_to_delivery_matrix):
+            return float("inf")
+        row = supply_to_delivery_matrix[supply_idx]
+        valid_times = [t for t in row if t < 99999]
+        return sum(valid_times) / len(valid_times) if valid_times else float("inf")
+
+    # Sortiramo po score-u (najbliži kupcima prvi)
+    scored = sorted(valid, key=lambda x: avg_time_to_customers(x[0]))
+
+    selected_supplies = []
+    selected_coords   = []
+    collected = 0.0
+
+    for orig_idx, s, coord in scored:
+        if collected >= total_demand:
+            break
+
+        needed    = total_demand - collected
+        available = float(s.get("liters", 0))
+        take      = min(available, needed)
+
+        supply_copy = dict(s)
+        supply_copy["liters"] = round(take, 1)
+        selected_supplies.append(supply_copy)
+        selected_coords.append(coord)
+        collected += take
+
+        print(f"  Mlekar '{s.get('name')}': uzimamo {take:.1f}L "
+              f"(kapacitet {available:.1f}L, score={avg_time_to_customers(orig_idx):.0f}s)")
+
+    print(f"Selekcija: {len(selected_supplies)} mlekara pokriva {collected:.1f}L od {total_demand:.1f}L traženih")
+    return selected_supplies, selected_coords
+
+
+# ─────────────────────────────────────────────
 # SPAJANJE NARUDŽBINA ISTE OSOBE (ista adresa → jedan stop)
 # ─────────────────────────────────────────────
 
@@ -400,61 +476,102 @@ async def generate_route(payload: RouteRequest):
     if not orders_clean:
         return {"status": "error", "message": f"Kupci nemaju unesene adrese. Preskoceni: {missing_addr_orders}"}
 
-    # ── KORAK 1: Spajamo narudžbine iste osobe pa balansiramo litre ─────────
+    # ── KORAK 1: Spajamo narudžbine iste osobe ───────────────────────────────
     orders_merged = merge_orders_by_address(orders_clean)
     if not orders_merged:
         return {"status": "error", "message": "Nema validnih narudžbina sa adresama."}
 
-    supplies, orders, balance_note = balance_liters(supplies_clean, orders_merged)
-    print(f"Balans: {balance_note}")
+    total_demand = round(sum(float(o.get("liters", 0)) for o in orders_merged), 1)
+    print(f"Ukupna tražnja: {total_demand}L od {len(orders_merged)} kupaca")
 
-    # ── KORAK 2: Geocodiranje svih adresa ─────────────────────────────────
+    # ── KORAK 2: Geocodiranje SVIH adresa (mlekari + kupci) ───────────────
     print("Geocodiram adrese...")
-    pickup_coords   = [geocode_address(s.get("address", "")) for s in supplies]
-    delivery_coords = [geocode_address(o.get("address", "")) for o in orders]
+    all_supply_coords   = [geocode_address(s.get("address", "")) for s in supplies_clean]
+    delivery_coords_raw = [geocode_address(o.get("address", "")) for o in orders_merged]
 
-    # Fallback ako geocoding ne uspe za neku adresu
-    pickup_coords   = [c if c else {"lat": 44.8, "lng": 20.5} for c in pickup_coords]
-    delivery_coords = [c if c else {"lat": 44.8, "lng": 20.5} for c in delivery_coords]
+    # Fallback koordinate (centar Beograda) ako geocoding ne uspe
+    FALLBACK = {"lat": 44.8125, "lng": 20.4612}
+    all_supply_coords = [c if c else FALLBACK for c in all_supply_coords]
+    delivery_coords   = [c if c else FALLBACK for c in delivery_coords_raw]
 
-    # ── KORAK 3: Distance Matrix ───────────────────────────────────────────
-    print("Računam Distance Matrix...")
+    # ── KORAK 3: Matrica svih mlekara → svih kupaca (za selekciju) ────────
+    print("Računam matricu mlekari→kupci za selekciju...")
+    supply_to_delivery_matrix = None
+    if all_supply_coords and delivery_coords:
+        supply_to_delivery_matrix = get_distance_matrix(all_supply_coords, delivery_coords)
 
-    all_coords = pickup_coords + delivery_coords
+    # Ako matrica nije dostupna, koristimo jednostavan fallback (redosled po kapacitetu)
+    if not supply_to_delivery_matrix:
+        supply_to_delivery_matrix = [
+            [999] * len(delivery_coords) for _ in all_supply_coords
+        ]
 
-    # Matrica svih→svih (za optimizaciju redosleda)
+    # ── KORAK 3b: Selekcija optimalnih mlekara ────────────────────────────
+    print("Selektujem optimalne mlekare...")
+    pickup_coords, supplies_selected = [], []
+
+    # Prolazimo kroz mlekare sortirane po blizini kupcima i uzimamo dok ne pokrijemo tražnju
+    valid_supplies = [
+        (i, s, all_supply_coords[i])
+        for i, s in enumerate(supplies_clean)
+        if float(s.get("liters", 0)) > 0
+    ]
+
+    def avg_score(supply_idx):
+        row = supply_to_delivery_matrix[supply_idx]
+        good = [t for t in row if t < 99998]
+        return sum(good) / len(good) if good else float("inf")
+
+    sorted_supplies = sorted(valid_supplies, key=lambda x: avg_score(x[0]))
+
+    collected = 0.0
+    for orig_idx, s, coord in sorted_supplies:
+        if collected >= total_demand:
+            break
+        needed    = total_demand - collected
+        available = float(s.get("liters", 0))
+        take      = min(available, needed)
+        s_copy    = dict(s)
+        s_copy["liters"] = round(take, 1)
+        supplies_selected.append(s_copy)
+        pickup_coords.append(coord)
+        collected += take
+        print(f"  ✓ '{s.get('name')}': {take:.1f}L (score={avg_score(orig_idx):.0f}s)")
+
+    if not supplies_selected:
+        return {"status": "error", "message": "Nema mlekara sa dostupnim mlekom za ovaj dan."}
+
+    supplies = supplies_selected
+    orders   = orders_merged
+    balance_note = f"Selektovano {len(supplies)} mlekara, ukupno {collected:.1f}L za {total_demand:.1f}L tražnje."
+
+    # ── KORAK 4: Matrica odabranih mlekara + kupaca za optimizaciju rute ──
+    print("Računam Distance Matrix za rutu...")
+    all_coords  = pickup_coords + delivery_coords
     full_matrix = get_distance_matrix(all_coords, all_coords)
 
-    # Ako API ne uspe, idemo sa fiksnim fallback redosledom
+    def secs_to_min(s):
+        return round(s / 60)
+
     if full_matrix:
-        n_pickup = len(pickup_coords)
+        n_pickup   = len(pickup_coords)
         n_delivery = len(delivery_coords)
 
-        # Pickup matrica (samo pickup→pickup deo)
         pickup_matrix = [
             [full_matrix[i][j] for j in range(n_pickup)]
             for i in range(n_pickup)
         ]
-
-        # Delivery matrica (samo delivery→delivery deo)
         delivery_matrix = [
             [full_matrix[n_pickup + i][n_pickup + j] for j in range(n_delivery)]
             for i in range(n_delivery)
         ]
-
-        # Pickup→Delivery matrica (za tranziciju)
         pickup_to_delivery = [
             [full_matrix[i][n_pickup + j] for j in range(n_delivery)]
             for i in range(n_pickup)
         ]
 
-        # Optimizacija redosleda
         pickup_order   = nearest_neighbor_order(pickup_coords, pickup_matrix)
         delivery_order = nearest_neighbor_order(delivery_coords, delivery_matrix)
-
-        # Realno vreme tranzita između stanica (u minutima, za AI prompt)
-        def secs_to_min(s):
-            return round(s / 60)
 
         transit_pickup = [
             secs_to_min(pickup_matrix[pickup_order[i]][pickup_order[i+1]])
@@ -462,20 +579,19 @@ async def generate_route(payload: RouteRequest):
         ]
         last_pickup_to_first_delivery = secs_to_min(
             pickup_to_delivery[pickup_order[-1]][delivery_order[0]]
-        ) if pickup_order and delivery_order else 30
+        ) if pickup_order and delivery_order else 20
 
         transit_delivery = [
             secs_to_min(delivery_matrix[delivery_order[i]][delivery_order[i+1]])
             for i in range(len(delivery_order) - 1)
         ]
     else:
-        # Fallback: prirodan redosled, procenjeno vreme
+        # Fallback: prirodan redosled
         pickup_order   = list(range(len(supplies)))
         delivery_order = list(range(len(orders)))
-        transit_pickup = [20] * max(0, len(supplies) - 1)
-        transit_delivery = [20] * max(0, len(orders) - 1)
-        last_pickup_to_first_delivery = 30
-        pickup_to_delivery = []
+        transit_pickup = [15] * max(0, len(supplies) - 1)
+        transit_delivery = [15] * max(0, len(orders) - 1)
+        last_pickup_to_first_delivery = 20
 
     # ── KORAK 4: Gradimo strukturu rute sa tačnim vremenima ───────────────
     print("Gradim raspored vremena...")
