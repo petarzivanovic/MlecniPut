@@ -107,40 +107,59 @@ def merge_by_address(orders: List[Dict]) -> List[Dict]:
 _geocache: Dict[str, Optional[Dict]] = {}
 
 def geocode(address: str) -> Optional[Dict]:
+    """
+    Geocoding koristeci ORS Geocoding API.
+    ORS radi na Render-u (isti API kljuc koji vec koristimo za Matrix).
+    """
     key = address.strip().lower()
     if key in _geocache:
         return _geocache[key]
 
-    parts       = [p.strip() for p in address.split(",")]
-    parts_no_zip = [p for p in parts if not (p.strip().isdigit() and len(p.strip()) == 5)]
-    attempts    = list(dict.fromkeys([
-        ", ".join(parts_no_zip),
-        address,
-        ", ".join(parts[:2]) + ", Srbija",
-    ]))
+    # Cistimo adresu - uklanjamo postanski broj koji zbunjuje ORS
+    parts = [p.strip() for p in address.split(",")]
+    parts_clean = [p for p in parts if not (p.strip().isdigit() and len(p.strip()) == 5)]
+    # ORS bolje radi sa engleskim nazivom grada
+    city_map = {"beograd": "Belgrade", "novi sad": "Novi Sad", "nis": "Nis", "nisˈ": "Nis"}
+    parts_en = []
+    for p in parts_clean:
+        mapped = city_map.get(p.strip().lower())
+        parts_en.append(mapped if mapped else p.strip().title())
+    query = ", ".join(parts_en)
 
-    headers = {"User-Agent": "MlecniPut/1.0"}
+    attempts = list(dict.fromkeys([query, address]))
+
     for attempt in attempts:
         try:
             r = requests.get(
-                "https://nominatim.openstreetmap.org/search",
-                headers=headers,
-                params={"q": attempt, "format": "json", "limit": 1, "countrycodes": "rs"},
+                "https://api.openrouteservice.org/geocode/search",
+                headers={"Authorization": ORS_API_KEY},
+                params={
+                    "text": attempt,
+                    "boundary.country": "RS",
+                    "size": 1,
+                },
                 timeout=6,
             )
             data = r.json()
-            if data:
-                lat = float(data[0]["lat"])
-                lng = float(data[0]["lon"])
-                label = data[0].get("display_name", attempt)[:70]
-                print(f"  Geocoded '{address}' -> '{label}' ({lat:.4f}, {lng:.4f})")
+            if "error" in data:
+                print(f"  ORS Geocoding auth greska: {data['error']}")
+                _geocache[key] = None
+                return None
+            features = data.get("features", [])
+            if features:
+                lng, lat = features[0]["geometry"]["coordinates"]
+                label = features[0].get("properties", {}).get("label", attempt)[:70]
+                # Proveravamo da li je rezultat samo grad (lose) ili ulica (dobro)
+                confidence = features[0].get("properties", {}).get("confidence", 0)
+                layer = features[0].get("properties", {}).get("layer", "")
+                print(f"  Geocoded '{address}' -> '{label}' ({lat:.5f}, {lng:.5f}) [{layer}, conf={confidence}]")
                 result = {"lat": lat, "lng": lng}
                 _geocache[key] = result
                 return result
             else:
-                print(f"  Geocoding: nema rezultata za '{attempt}'")
+                print(f"  ORS Geocoding: nema rezultata za '{attempt}'")
         except Exception as e:
-            print(f"  Geocoding greska '{attempt}': {e}")
+            print(f"  ORS Geocoding greska '{attempt}': {e}")
 
     print(f"  Geocoding NEUSPESNO za '{address}'")
     _geocache[key] = None
