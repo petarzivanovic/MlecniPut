@@ -351,8 +351,16 @@ async def generate_route(payload: RouteRequest):
 
     # 3. Geocoding
     print("\n[3] Geocoding...")
-    sup_coords = [geocode(s["address"]) or {"lat": 44.8125, "lng": 20.4612} for s in suppliers]
-    del_coords = [geocode(d["address"]) or {"lat": 44.8125, "lng": 20.4612} for d in deliveries]
+    FALLBACK = {"lat": 44.8125, "lng": 20.4612}
+    sup_coords = [geocode(s["address"]) or FALLBACK for s in suppliers]
+    del_coords = [geocode(d["address"]) or FALLBACK for d in deliveries]
+
+    print("  Koordinate mlekara:")
+    for s, c in zip(suppliers, sup_coords):
+        print(f"    '{s['name']}' @ {c['lat']:.5f}, {c['lng']:.5f}")
+    print("  Koordinate kupaca:")
+    for d, c in zip(deliveries, del_coords):
+        print(f"    '{d['name']}' @ {c['lat']:.5f}, {c['lng']:.5f}")
 
     # 4. Matrica mlekari→kupci za selekciju
     print("\n[4] Matrica mlekari->kupci...")
