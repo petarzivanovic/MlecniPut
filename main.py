@@ -115,79 +115,72 @@ def normalize_order(o: Dict[str, Any]) -> Dict[str, Any]:
 # ORS HELPERS (OpenRouteService — besplatna alternativa Google Maps)
 # ─────────────────────────────────────────────
 
-# Mapa srpskih naziva ulica → engleski (za ORS koji bolje razume engleski naziv grada)
-CITY_MAP = {
-    "beograd": "Belgrade", "novi sad": "Novi Sad", "nis": "Nis", "niš": "Nis",
-    "kragujevac": "Kragujevac", "subotica": "Subotica", "zemun": "Belgrade",
-}
+# ─────────────────────────────────────────────
+# NOMINATIM GEOCODING (OpenStreetMap — besplatan, bez ključa, odličan za Srbiju)
+# ─────────────────────────────────────────────
 
-def normalize_address_for_ors(address: str) -> str:
+# Keš geocodiranih adresa — da ne pozivamo API dva puta za istu adresu
+_geocode_cache: Dict[str, Optional[Dict]] = {}
+
+def normalize_address_for_nominatim(address: str) -> str:
     """
-    ORS geocoder bolje radi sa:
-    - Title Case nazivima ulica
-    - Engleskim nazivom grada (Beograd → Belgrade)
-    - Bez poštanskog broja (često zbunjuje)
-    Primer: 'jove ilica 154, beograd, 11000' → 'Jove Ilica 154, Belgrade, Serbia'
+    Nominatim bolje radi sa srpskim nazivima bez poštanskog broja.
+    Primer: 'gramsijeva 4, Beograd, 11070' → 'Gramsijeva 4, Beograd'
     """
     parts = [p.strip() for p in address.split(",")]
-    normalized = []
-    for part in parts:
-        lower = part.lower()
-        # Preskačemo samo poštanske brojeve (5 cifara)
-        if part.strip().isdigit() and len(part.strip()) == 5:
-            continue
-        # Zamenjujemo srpski naziv grada engleskim
-        mapped = CITY_MAP.get(lower)
-        if mapped:
-            normalized.append(mapped)
-        else:
-            # Title Case za ulice
-            normalized.append(part.title())
-    result = ", ".join(normalized)
-    if "Serbia" not in result and "Srbija" not in result:
-        result += ", Serbia"
-    return result
+    # Uklanjamo poštanski broj (5 cifara)
+    parts = [p for p in parts if not (p.strip().isdigit() and len(p.strip()) == 5)]
+    # Title Case
+    parts = [p.title() for p in parts]
+    return ", ".join(parts)
 
 
 def geocode_address(address: str) -> Optional[Dict]:
     """
-    Pretvara adresu u {lat, lng} koristeći ORS Geocoding API.
-    Pokušava sa normalizovanom adresom, pa sa originalnom kao fallback.
-    Vraća None ako ne uspe.
+    Pretvara adresu u {lat, lng} koristeći Nominatim (OpenStreetMap).
+    Besplatan, bez API ključa, odličan za srpske adrese.
+    Koristi keš da ne poziva API više puta za istu adresu.
     """
-    normalized = normalize_address_for_ors(address)
-    attempts = [normalized, address + ", Serbia"] if normalized != address else [normalized]
+    cache_key = address.strip().lower()
+    if cache_key in _geocode_cache:
+        return _geocode_cache[cache_key]
 
-    url = "https://api.openrouteservice.org/geocode/search"
-    headers = {"Authorization": ORS_API_KEY}
+    normalized = normalize_address_for_nominatim(address)
+
+    # Pokušavamo redom: normalizovana → originalna → samo ulica i grad
+    parts = [p.strip() for p in address.split(",")]
+    street_city = ", ".join(parts[:2]) if len(parts) >= 2 else address
+    attempts = [normalized, address, street_city + ", Srbija"]
+
+    url = "https://nominatim.openstreetmap.org/search"
+    headers = {"User-Agent": "MlecniPut/1.0 (milk-delivery-app)"}
 
     for attempt in attempts:
         params = {
-            "text":             attempt,
-            "boundary.country": "RS",
-            "size":             1,
+            "q":              attempt,
+            "format":         "json",
+            "limit":          1,
+            "countrycodes":   "rs",
+            "addressdetails": 0,
         }
         try:
-            r = requests.get(url, headers=headers, params=params, timeout=5)
+            r = requests.get(url, headers=headers, params=params, timeout=6)
             data = r.json()
-
-            # Logujemo grešku autorizacije odmah
-            if "error" in data:
-                print(f"ORS Geocoding greška (auth?): {data['error']}")
-                return None
-
-            features = data.get("features", [])
-            if features:
-                lng, lat = features[0]["geometry"]["coordinates"]
-                label = features[0].get("properties", {}).get("label", attempt)
-                print(f"Geocoded '{address}' → '{label}' lat={lat:.4f}, lng={lng:.4f}")
-                return {"lat": lat, "lng": lng}
+            if data:
+                lat = float(data[0]["lat"])
+                lng = float(data[0]["lon"])
+                display = data[0].get("display_name", attempt)[:60]
+                print(f"Geocoded '{address}' → '{display}' lat={lat:.4f}, lng={lng:.4f}")
+                result = {"lat": lat, "lng": lng}
+                _geocode_cache[cache_key] = result
+                return result
             else:
-                print(f"Geocoding: nema rezultata za '{attempt}' (pokušavam sledeći...)")
+                print(f"Nominatim: nema rezultata za '{attempt}'")
         except Exception as e:
-            print(f"Geocoding exception za '{attempt}': {e}")
+            print(f"Nominatim exception za '{attempt}': {e}")
 
-    print(f"Geocoding NEUSPEŠNO za '{address}' — koristiću fallback koordinate")
+    print(f"Geocoding NEUSPEŠNO za '{address}' — koristiću fallback")
+    _geocode_cache[cache_key] = None
     return None
 
 
@@ -646,7 +639,7 @@ async def generate_route(payload: RouteRequest):
     print("Gradim raspored vremena...")
 
     START_HOUR = 7
-    SERVICE_MIN = 5   # minuta za utovar/istovar po stanici (dostava mleka je brza)
+    SERVICE_MIN = 10  # minuta za utovar/istovar po stanici
     current_sec = START_HOUR * 3600
 
     def fmt(sec):
