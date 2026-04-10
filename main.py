@@ -22,741 +22,433 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════
 # MODELI
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
 
 class RouteRequest(BaseModel):
     driver_id: str
     selected_date: str
-    supplies: List[Dict[str, Any]]   # mlekari  → {name, address, liters}
-    orders:   List[Dict[str, Any]]   # kupci    → {name, address, liters}
+    supplies: List[Dict[str, Any]]
+    orders: List[Dict[str, Any]]
 
 class PredictionRequest(BaseModel):
     subscriptions: List[Dict[str, Any]]
     orders: List[Dict[str, Any]]
 
 
-# ─────────────────────────────────────────────
-# NORMALIZACIJA PODATAKA SA FRONTENDA
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+# KORAK 1 — NORMALIZACIJA
+# ═══════════════════════════════════════════════════════════════
 
-def normalize_supply(s: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Frontend šalje: {id, name, address, capacity_liters_per_day, ...}
-    Backend očekuje: {name, address, liters}
-    """
-    liters = (
-        s.get("liters")                    # ako već postoji
-        or s.get("capacity_liters_per_day") # polje iz partner_applications
-        or s.get("capacity")               # alternativno ime
-        or 0
+def normalize_supply(s: Dict) -> Optional[Dict]:
+    liters = float(
+        s.get("liters") or
+        s.get("capacity_liters_per_day") or
+        s.get("capacity") or 0
     )
-    return {
-        "id":      s.get("id", ""),
-        "name":    s.get("name") or s.get("full_name") or "Nepoznat mlekar",
-        "address": s.get("address") or "",
-        "liters":  float(liters),
-    }
+    address = (s.get("address") or "").strip()
+    name    = s.get("name") or s.get("full_name") or "Nepoznat mlekar"
+    if not address or liters <= 0:
+        print(f"  Supply preskocen — '{name}': adresa={address!r}, liters={liters}")
+        return None
+    return {"name": name, "address": address, "liters": liters}
 
 
-def normalize_order(o: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Frontend šalje dve vrste:
-      subscription: {id, user_id, plan_type, weekly_liters, delivery_days, delivery_address, customer_name, type}
-      single_order: {id, user_id, delivery_date, items, delivery_address, customer_name, type}
-    Backend očekuje: {name, address, liters}
-    """
+def normalize_order(o: Dict) -> Optional[Dict]:
+    name    = o.get("customer_name") or o.get("name") or "Nepoznat kupac"
+    address = (o.get("delivery_address") or o.get("address") or "").strip()
+    if not address:
+        print(f"  Order preskocen — '{name}': nema adrese")
+        return None
+
     order_type = o.get("type", "")
-
-    # ── Ime kupca ──────────────────────────────
-    name = (
-        o.get("name")
-        or o.get("customer_name")
-        or "Nepoznat kupac"
-    )
-
-    # ── Adresa kupca ───────────────────────────
-    address = (
-        o.get("address")
-        or o.get("delivery_address")
-        or ""
-    )
-
-    # ── Litraža ────────────────────────────────
     if order_type == "subscription":
-        weekly = float(o.get("weekly_liters") or o.get("liters") or 0)
-        delivery_days = o.get("delivery_days") or []
-        num_days = max(len(delivery_days), 1)   # koliko dana nedeljno se dostavlja
-        liters = weekly / num_days              # dnevna količina
+        weekly   = float(o.get("weekly_liters") or o.get("liters") or 0)
+        days     = o.get("delivery_days") or []
+        liters   = round(weekly / max(len(days), 1), 1)
     elif order_type == "single_order":
-        # items može biti lista {product, quantity_liters} ili broj
         items = o.get("items") or o.get("liters") or 0
         if isinstance(items, list):
-            liters = sum(
-                float(item.get("quantity_liters") or item.get("liters") or item.get("quantity") or 0)
-                for item in items
-            )
+            liters = round(sum(
+                float(i.get("quantity_liters") or i.get("liters") or i.get("quantity") or 0)
+                for i in items
+            ), 1)
         else:
-            liters = float(items)
+            liters = round(float(items), 1)
     else:
-        liters = float(o.get("liters") or o.get("weekly_liters") or 0)
+        liters = round(float(o.get("liters") or o.get("weekly_liters") or 0), 1)
 
-    return {
-        "id":      o.get("id", ""),
-        "name":    name,
-        "address": address,
-        "liters":  round(liters, 1),
-        "type":    order_type,
-    }
+    if liters <= 0:
+        print(f"  Order preskocen — '{name}': liters=0")
+        return None
+
+    return {"name": name, "address": address, "liters": liters}
 
 
-# ─────────────────────────────────────────────
-# ORS HELPERS (OpenRouteService — besplatna alternativa Google Maps)
-# ─────────────────────────────────────────────
-
-# ─────────────────────────────────────────────
-# NOMINATIM GEOCODING (OpenStreetMap — besplatan, bez ključa, odličan za Srbiju)
-# ─────────────────────────────────────────────
-
-# Keš geocodiranih adresa — da ne pozivamo API dva puta za istu adresu
-_geocode_cache: Dict[str, Optional[Dict]] = {}
-
-def normalize_address_for_nominatim(address: str) -> str:
-    """
-    Nominatim bolje radi sa srpskim nazivima bez poštanskog broja.
-    Primer: 'gramsijeva 4, Beograd, 11070' → 'Gramsijeva 4, Beograd'
-    """
-    parts = [p.strip() for p in address.split(",")]
-    # Uklanjamo poštanski broj (5 cifara)
-    parts = [p for p in parts if not (p.strip().isdigit() and len(p.strip()) == 5)]
-    # Title Case
-    parts = [p.title() for p in parts]
-    return ", ".join(parts)
+def merge_by_address(orders: List[Dict]) -> List[Dict]:
+    merged: Dict[str, Dict] = {}
+    for o in orders:
+        key = o["address"].strip().lower()
+        if key in merged:
+            merged[key]["liters"] = round(merged[key]["liters"] + o["liters"], 1)
+        else:
+            merged[key] = dict(o)
+    result = list(merged.values())
+    print(f"Merge: {len(orders)} narudzibna -> {len(result)} jedinstvenih stanica")
+    return result
 
 
-def geocode_address(address: str) -> Optional[Dict]:
-    """
-    Pretvara adresu u {lat, lng} koristeći Nominatim (OpenStreetMap).
-    Besplatan, bez API ključa, odličan za srpske adrese.
-    Koristi keš da ne poziva API više puta za istu adresu.
-    """
-    cache_key = address.strip().lower()
-    if cache_key in _geocode_cache:
-        return _geocode_cache[cache_key]
+# ═══════════════════════════════════════════════════════════════
+# KORAK 2 — GEOCODING (Nominatim / OpenStreetMap)
+# ═══════════════════════════════════════════════════════════════
 
-    normalized = normalize_address_for_nominatim(address)
+_geocache: Dict[str, Optional[Dict]] = {}
 
-    # Pokušavamo redom: normalizovana → originalna → samo ulica i grad
-    parts = [p.strip() for p in address.split(",")]
-    street_city = ", ".join(parts[:2]) if len(parts) >= 2 else address
-    attempts = [normalized, address, street_city + ", Srbija"]
+def geocode(address: str) -> Optional[Dict]:
+    key = address.strip().lower()
+    if key in _geocache:
+        return _geocache[key]
 
-    url = "https://nominatim.openstreetmap.org/search"
-    headers = {"User-Agent": "MlecniPut/1.0 (milk-delivery-app)"}
+    parts       = [p.strip() for p in address.split(",")]
+    parts_no_zip = [p for p in parts if not (p.strip().isdigit() and len(p.strip()) == 5)]
+    attempts    = list(dict.fromkeys([
+        ", ".join(parts_no_zip),
+        address,
+        ", ".join(parts[:2]) + ", Srbija",
+    ]))
 
+    headers = {"User-Agent": "MlecniPut/1.0"}
     for attempt in attempts:
-        params = {
-            "q":              attempt,
-            "format":         "json",
-            "limit":          1,
-            "countrycodes":   "rs",
-            "addressdetails": 0,
-        }
         try:
-            r = requests.get(url, headers=headers, params=params, timeout=6)
+            r = requests.get(
+                "https://nominatim.openstreetmap.org/search",
+                headers=headers,
+                params={"q": attempt, "format": "json", "limit": 1, "countrycodes": "rs"},
+                timeout=6,
+            )
             data = r.json()
             if data:
                 lat = float(data[0]["lat"])
                 lng = float(data[0]["lon"])
-                display = data[0].get("display_name", attempt)[:60]
-                print(f"Geocoded '{address}' → '{display}' lat={lat:.4f}, lng={lng:.4f}")
+                label = data[0].get("display_name", attempt)[:70]
+                print(f"  Geocoded '{address}' -> '{label}' ({lat:.4f}, {lng:.4f})")
                 result = {"lat": lat, "lng": lng}
-                _geocode_cache[cache_key] = result
+                _geocache[key] = result
                 return result
             else:
-                print(f"Nominatim: nema rezultata za '{attempt}'")
+                print(f"  Geocoding: nema rezultata za '{attempt}'")
         except Exception as e:
-            print(f"Nominatim exception za '{attempt}': {e}")
+            print(f"  Geocoding greska '{attempt}': {e}")
 
-    print(f"Geocoding NEUSPEŠNO za '{address}' — koristiću fallback")
-    _geocode_cache[cache_key] = None
+    print(f"  Geocoding NEUSPESNO za '{address}'")
+    _geocache[key] = None
     return None
 
 
-def get_distance_matrix(origins: List[Dict], destinations: List[Dict]) -> Optional[List[List[int]]]:
-    """
-    Vraća matricu putnih vremena u SEKUNDAMA između svih parova.
-    Koristi ORS Matrix API (driving-car profil).
-    travel_times[i][j] = sekunde od origins[i] do destinations[j]
-    
-    ORS Matrix prima koordinate kao [[lng, lat], ...] — obrnuto od Google!
-    """
-    url = "https://api.openrouteservice.org/v2/matrix/driving-car"
-    headers = {
-        "Authorization": ORS_API_KEY,
-        "Content-Type":  "application/json",
-    }
+# ═══════════════════════════════════════════════════════════════
+# KORAK 3 — DISTANCE MATRIX (ORS)
+# ═══════════════════════════════════════════════════════════════
 
-    # ORS očekuje [lng, lat] redosled
-    all_coords = [[c["lng"], c["lat"]] for c in origins + destinations]
-    n_origins  = len(origins)
-    n_total    = len(all_coords)
-
-    # sources = indeksi origins, destinations = indeksi destinations
-    sources      = list(range(n_origins))
-    destinations_idx = list(range(n_origins, n_total))
-
-    body = {
-        "locations":    all_coords,
-        "sources":      sources,
-        "destinations": destinations_idx,
-        "metrics":      ["duration"],
-    }
-
+def get_travel_matrix(coords: List[Dict]) -> Optional[List[List[int]]]:
+    if len(coords) < 2:
+        return [[0]]
+    locations = [[c["lng"], c["lat"]] for c in coords]
     try:
-        r = requests.post(url, headers=headers, json=body, timeout=15)
+        r = requests.post(
+            "https://api.openrouteservice.org/v2/matrix/driving-car",
+            headers={"Authorization": ORS_API_KEY, "Content-Type": "application/json"},
+            json={"locations": locations, "metrics": ["duration"]},
+            timeout=15,
+        )
         data = r.json()
-
         if "durations" not in data:
-            print(f"ORS Matrix greška: {data}")
+            print(f"  ORS Matrix greska: {data}")
             return None
-
-        # durations[i][j] = sekunde od origins[i] do destinations[j]
         matrix = [
-            [int(val) if val is not None else 99999 for val in row]
+            [int(v) if v is not None else 99999 for v in row]
             for row in data["durations"]
         ]
-        print(f"ORS Matrix OK: {len(matrix)}x{len(matrix[0])} matrica")
+        print(f"  ORS Matrix OK: {len(matrix)}x{len(matrix)} matrica")
         return matrix
-
     except Exception as e:
-        print(f"ORS Matrix exception: {e}")
+        print(f"  ORS Matrix exception: {e}")
         return None
 
 
-# ─────────────────────────────────────────────
-# OPTIMIZACIJA REDOSLEDA (nearest-neighbor TSP)
-# ─────────────────────────────────────────────
-
-def nearest_neighbor_order(coords: List[Dict], travel_matrix: List[List[int]]) -> List[int]:
-    """
-    Vraća redosled indeksa lista coords koji minimizuje ukupno putno vreme.
-    Polazna tačka je uvek indeks 0 (prva u listi).
-    """
-    n = len(coords)
-    if n == 0:
-        return []
-    if n == 1:
-        return [0]
-
-    visited = [False] * n
-    order = [0]
-    visited[0] = True
-
-    for _ in range(n - 1):
-        last = order[-1]
-        best_time = float("inf")
-        best_idx  = -1
-        for j in range(n):
-            if not visited[j] and travel_matrix[last][j] < best_time:
-                best_time = travel_matrix[last][j]
-                best_idx  = j
-        if best_idx == -1:
-            # svi ostali su nedostupni, uzimamo prvog neposećenog
-            best_idx = next(i for i in range(n) if not visited[i])
-        visited[best_idx] = True
-        order.append(best_idx)
-
-    return order
+def fallback_matrix(n: int) -> List[List[int]]:
+    return [[0 if i == j else 1200 for j in range(n)] for i in range(n)]
 
 
-# ─────────────────────────────────────────────
-# SELEKCIJA OPTIMALNIH MLEKARA
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+# KORAK 4 — SELEKCIJA MLEKARA
+# ═══════════════════════════════════════════════════════════════
 
-def select_optimal_supplies(
-    supplies: list,
-    supply_coords: list,
-    delivery_coords: list,
+def select_suppliers(
+    suppliers: List[Dict],
+    sup_coords: List[Dict],
+    del_coords: List[Dict],
     total_demand: float,
-    supply_to_delivery_matrix: list,  # [supply_i][delivery_j] u sekundama
-) -> tuple[list, list]:
-    """
-    Bira minimalan optimalan podskup mlekara koji:
-    1. Zadovoljava ukupnu tražnju (total_demand litara)
-    2. Minimizuje ukupno putno vreme do kupaca
-    3. Ne uključuje mlekare sa 0L kapaciteta
-
-    Vraća (odabrani supplies, njihovi koordinati).
-
-    Logika:
-    - Svaki mlekar dobija "score" = prosečno vreme do svih kupaca (manji = bolji)
-    - Sortiramo mlekare po score-u (najbliži kupcima prvi)
-    - Pohlepno dodajemo mlekare dok ne pokrijemo tražnju
-    - Ako jedan mlekar pokriva sve → samo njega uzimamo
-    """
-    if not supplies:
-        return [], []
-
-    # Filtriramo mlekare bez kapaciteta
-    valid = [
-        (i, s, supply_coords[i])
-        for i, s in enumerate(supplies)
-        if float(s.get("liters", 0)) > 0
-    ]
-
-    if not valid:
-        print("Selekcija: nema mlekara sa dostupnim litrama!")
-        return [], []
-
-    # Score = prosečno putno vreme do svih kupaca (sekunde)
-    # Manji score = mlekar bliži kupcima = bolji izbor
-    def avg_time_to_customers(supply_idx: int) -> float:
-        if not supply_to_delivery_matrix or supply_idx >= len(supply_to_delivery_matrix):
+    sup_to_del: List[List[int]],
+) -> tuple:
+    def avg_score(i: int) -> float:
+        if i >= len(sup_to_del):
             return float("inf")
-        row = supply_to_delivery_matrix[supply_idx]
-        valid_times = [t for t in row if t < 99999]
-        return sum(valid_times) / len(valid_times) if valid_times else float("inf")
+        row = [t for t in sup_to_del[i] if t < 99998]
+        return sum(row) / len(row) if row else float("inf")
 
-    # Sortiramo po score-u (najbliži kupcima prvi)
-    scored = sorted(valid, key=lambda x: avg_time_to_customers(x[0]))
-
-    selected_supplies = []
-    selected_coords   = []
+    indexed = sorted(range(len(suppliers)), key=avg_score)
+    sel_s, sel_c = [], []
     collected = 0.0
 
-    for orig_idx, s, coord in scored:
+    for i in indexed:
         if collected >= total_demand:
             break
-
-        needed    = total_demand - collected
-        available = float(s.get("liters", 0))
-        take      = min(available, needed)
-
-        supply_copy = dict(s)
-        supply_copy["liters"] = round(take, 1)
-        selected_supplies.append(supply_copy)
-        selected_coords.append(coord)
+        s     = suppliers[i]
+        take  = min(float(s["liters"]), total_demand - collected)
+        sc    = dict(s)
+        sc["liters"] = round(take, 1)
+        sel_s.append(sc)
+        sel_c.append(sup_coords[i])
         collected += take
+        print(f"  Mlekar '{s['name']}': uzimamo {take:.1f}L (score={avg_score(i):.0f}s)")
 
-        print(f"  Mlekar '{s.get('name')}': uzimamo {take:.1f}L "
-              f"(kapacitet {available:.1f}L, score={avg_time_to_customers(orig_idx):.0f}s)")
-
-    print(f"Selekcija: {len(selected_supplies)} mlekara pokriva {collected:.1f}L od {total_demand:.1f}L traženih")
-    return selected_supplies, selected_coords
+    print(f"  Selekcija: {len(sel_s)} mlekara, {collected:.1f}L / {total_demand:.1f}L")
+    return sel_s, sel_c
 
 
-# ─────────────────────────────────────────────
-# SPAJANJE NARUDŽBINA ISTE OSOBE (ista adresa → jedan stop)
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+# KORAK 5 — OPTIMALNA RUTA
+# nearest-neighbor: mlekari → od poslednjeg mlekara najbliži kupac → sledeći...
+# ═══════════════════════════════════════════════════════════════
 
-def merge_orders_by_address(orders: list) -> list:
-    """
-    Ako isti kupac ima više narudžbina za isti dan (subscription + single_order,
-    ili više single_order-a), spajamo ih u jedan stop sa zbirnom litražom.
-    Grupišemo po (address.strip().lower()) — isti ključ = isti stop.
-    """
-    merged: dict = {}
-    for o in orders:
-        addr_key = (o.get("address") or "").strip().lower()
-        if not addr_key:
-            continue  # bez adrese se ne može ni geocodirati
-
-        if addr_key not in merged:
-            merged[addr_key] = dict(o)  # kopija prvog
-        else:
-            # Dodajemo litre na postojeći stop
-            merged[addr_key]["liters"] = round(
-                float(merged[addr_key].get("liters", 0)) + float(o.get("liters", 0)), 1
-            )
-            # Ako drugi zapis ima ime a prvi ne, koristimo koje god postoji
-            if not merged[addr_key].get("name"):
-                merged[addr_key]["name"] = o.get("name")
-
-    result = list(merged.values())
-    print(f"Merge: {len(orders)} narudžbina → {len(result)} jedinstvenih stanica")
-    return result
-
-
-# ─────────────────────────────────────────────
-# BALANS LITARA (Python matematika, ne AI)
-# ─────────────────────────────────────────────
-
-def balance_liters(supplies: List[Dict], orders: List[Dict]) -> tuple[List[Dict], List[Dict], str]:
-    """
-    Garantuje da suma pickup litara == suma delivery litara.
-    Ako ima viška ponude, smanjuje poslednjeg mlekara.
-    Ako ima viška potražnje, smanjuje poslednju narudžbinu.
-    Vraća (usklađene supplies, usklađene orders, poruku o korekciji).
-    """
-    total_supply = sum(float(s.get("liters", 0)) for s in supplies)
-    total_demand = sum(float(o.get("liters", 0)) for o in orders)
-
-    note = ""
-
-    if abs(total_supply - total_demand) < 0.01:
-        return supplies, orders, "Ponuda i potražnja su izbalansirane."
-
-    if total_supply > total_demand:
-        # Višak ponude — smanjujemo poslednjeg mlekara
-        diff = total_supply - total_demand
-        supplies = [dict(s) for s in supplies]
-        supplies[-1]["liters"] = max(0, float(supplies[-1]["liters"]) - diff)
-        note = (f"Ponuda ({total_supply:.1f}L) > Potražnja ({total_demand:.1f}L). "
-                f"Preuzimamo {total_demand:.1f}L ukupno — {diff:.1f}L manje od mlekara '{supplies[-1]['name']}'.")
-    else:
-        # Višak potražnje — smanjujemo poslednju narudžbinu
-        diff = total_demand - total_supply
-        orders = [dict(o) for o in orders]
-        orders[-1]["liters"] = max(0, float(orders[-1]["liters"]) - diff)
-        note = (f"Potražnja ({total_demand:.1f}L) > Ponuda ({total_supply:.1f}L). "
-                f"Isporučujemo {total_supply:.1f}L ukupno — {diff:.1f}L manje kupcu '{orders[-1]['name']}'.")
-
-    return supplies, orders, note
-
-
-# ─────────────────────────────────────────────
-# GRADNJA FINALNE RUTE SA VREMENIMA
-# ─────────────────────────────────────────────
-
-def build_stops_with_times(
-    pickups: List[Dict],
+def build_route(
+    suppliers: List[Dict],
+    sup_coords: List[Dict],
     deliveries: List[Dict],
-    pickup_coords: List[Dict],
-    delivery_coords: List[Dict],
-    pickup_order: List[int],
-    delivery_order: List[int],
-    pickup_to_delivery_times: List[List[int]],  # [pickup_i][delivery_j] u sekundama
-    start_hour: int = 7,
-    start_minute: int = 0,
-    service_minutes: int = 15,  # minuta po stanici (utovar/istovar)
+    del_coords: List[Dict],
+    matrix: List[List[int]],
+    start_sec: int = 7 * 3600,
+    service_sec: int = 10 * 60,
 ) -> List[Dict]:
-    """
-    Gradi listu stanica sa realnim vremenima.
-    Redosled: svi pickup-ovi → svi delivery-ji.
-    Vreme prelaska između stanica dolazi iz Google Distance Matrix.
-    """
+    n_sup = len(suppliers)
+    n_del = len(deliveries)
+
+    def travel_sec(i: int, j: int) -> int:
+        if 0 <= i < len(matrix) and 0 <= j < len(matrix):
+            v = matrix[i][j]
+            return v if v < 99998 else 1200
+        return 1200
+
+    def fmt(sec: int) -> str:
+        return f"{(sec // 3600) % 24:02d}:{(sec % 3600) // 60:02d}"
+
     stops = []
-    current_seconds = start_hour * 3600 + start_minute * 60
+    current_sec = start_sec
 
-    def fmt_time(seconds: int) -> str:
-        h = (seconds // 3600) % 24
-        m = (seconds % 3600) // 60
-        return f"{h:02d}:{m:02d}"
+    # ── Mlekari: nearest-neighbor počevši od indeksa 0 ────────────
+    sup_visited = [False] * n_sup
+    sup_order   = [0]
+    sup_visited[0] = True
 
-    # --- PICKUP FAZA ---
-    # Matrica pickup→pickup za redosled
-    all_pickup_coords  = [pickup_coords[i]  for i in pickup_order]
+    for _ in range(n_sup - 1):
+        cur = sup_order[-1]
+        best_t, best_j = float("inf"), -1
+        for j in range(n_sup):
+            if not sup_visited[j] and matrix[cur][j] < best_t:
+                best_t = matrix[cur][j]
+                best_j = j
+        if best_j == -1:
+            best_j = next(j for j in range(n_sup) if not sup_visited[j])
+        sup_visited[best_j] = True
+        sup_order.append(best_j)
 
-    for step, idx in enumerate(pickup_order):
-        stop = dict(pickups[idx])
-        stop["type"] = "pickup"
-        stop["time"] = fmt_time(current_seconds)
-        stop["liters"] = float(stop.get("liters", 0))
-        stops.append(stop)
+    for step, si in enumerate(sup_order):
+        stops.append({
+            "type":    "pickup",
+            "name":    suppliers[si]["name"],
+            "address": suppliers[si]["address"],
+            "liters":  suppliers[si]["liters"],
+            "time":    fmt(current_sec),
+        })
+        current_sec += service_sec
+        if step < len(sup_order) - 1:
+            nxt = sup_order[step + 1]
+            current_sec += travel_sec(si, nxt)
 
-        # Vreme do sledeće tačke
-        if step < len(pickup_order) - 1:
-            next_idx = pickup_order[step + 1]
-            # koristimo pickup→pickup matricu ako je dostupna
-            travel = 1800  # fallback 30min
-            current_seconds += travel + service_minutes * 60
-        else:
-            current_seconds += service_minutes * 60  # servis na poslednjoj pickup stanici
+    # ── Kupci: od poslednjeg mlekara, nearest-neighbor ────────────
+    last_sup = sup_order[-1]  # globalni indeks poslednjeg mlekara u matrici
+    del_visited = [False] * n_del
+    del_order   = []
 
-    # --- DELIVERY FAZA ---
-    all_delivery_coords = [delivery_coords[j] for j in delivery_order]
+    # Prvog kupca biramo kao najbližeg poslednjem mlekaru
+    best_t, first_del = float("inf"), 0
+    for j in range(n_del):
+        t = travel_sec(last_sup, n_sup + j)
+        if t < best_t:
+            best_t, first_del = t, j
 
-    for step, idx in enumerate(delivery_order):
-        stop = dict(deliveries[idx])
-        stop["type"] = "delivery"
-        stop["time"] = fmt_time(current_seconds)
-        stop["liters"] = float(stop.get("liters", 0))
-        stops.append(stop)
+    del_visited[first_del] = True
+    del_order.append(first_del)
+    current_sec += travel_sec(last_sup, n_sup + first_del)
 
-        if step < len(delivery_order) - 1:
-            travel = 1800  # fallback 30min
-            current_seconds += travel + service_minutes * 60
-        else:
-            current_seconds += service_minutes * 60
+    # Ostale kupce biramo nearest-neighbor
+    for _ in range(n_del - 1):
+        cur_global = n_sup + del_order[-1]
+        best_t, best_j = float("inf"), -1
+        for j in range(n_del):
+            if not del_visited[j]:
+                t = travel_sec(cur_global, n_sup + j)
+                if t < best_t:
+                    best_t, best_j = t, j
+        if best_j == -1:
+            best_j = next(j for j in range(n_del) if not del_visited[j])
+        del_visited[best_j] = True
+        del_order.append(best_j)
+
+    for step, di in enumerate(del_order):
+        stops.append({
+            "type":    "delivery",
+            "name":    deliveries[di]["name"],
+            "address": deliveries[di]["address"],
+            "liters":  deliveries[di]["liters"],
+            "time":    fmt(current_sec),
+        })
+        current_sec += service_sec
+        if step < len(del_order) - 1:
+            nxt_global = n_sup + del_order[step + 1]
+            current_sec += travel_sec(n_sup + di, nxt_global)
 
     return stops
 
 
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
 # GLAVNI ENDPOINT
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
 
 @app.post("/api/generate-route")
 async def generate_route(payload: RouteRequest):
-    print(f"--- AI RAČUNA RUTU ZA VOZAČA: {payload.driver_id} | Datum: {payload.selected_date} ---")
+    print(f"\n{'='*60}")
+    print(f"RUTA: vozac={payload.driver_id} | datum={payload.selected_date}")
+    print(f"{'='*60}")
 
-    if not payload.supplies:
-        return {"status": "error", "message": "Nema dostupnih mlekara za ovaj dan."}
-    if not payload.orders:
-        return {"status": "error", "message": "Nema narudžbina za ovaj dan."}
+    # 1. Normalizacija
+    print("\n[1] Normalizacija...")
+    suppliers = [s for s in (normalize_supply(x) for x in payload.supplies) if s]
+    orders_raw = [o for o in (normalize_order(x) for x in payload.orders) if o]
 
-    # ── KORAK 0: Normalizacija polja sa frontenda ─────────────────────────
-    # Frontend šalje drugačija imena polja — ovde mapiramo na ono što backend očekuje
-    raw_supplies = [normalize_supply(s) for s in payload.supplies]
-    raw_orders   = [normalize_order(o)  for o in payload.orders]
+    if not suppliers:
+        return {"status": "error", "message": "Nema mlekara sa validnom adresom i litrazom."}
+    if not orders_raw:
+        return {"status": "error", "message": "Nema narudzibna sa validnom adresom."}
 
-    print(f"Normalizovani supplies: {json.dumps(raw_supplies, ensure_ascii=False)}")
-    print(f"Normalizovani orders:   {json.dumps(raw_orders,   ensure_ascii=False)}")
+    # 2. Merge narudzbina
+    print("\n[2] Merge narudzibna...")
+    deliveries   = merge_by_address(orders_raw)
+    total_demand = round(sum(d["liters"] for d in deliveries), 1)
+    print(f"  Ukupna traznja: {total_demand}L od {len(deliveries)} kupaca")
 
-    # Filtriramo stavke bez adrese
-    supplies_clean = [s for s in raw_supplies if s.get("address", "").strip()]
-    orders_clean   = [o for o in raw_orders   if o.get("address", "").strip()]
+    # 3. Geocoding
+    print("\n[3] Geocoding...")
+    sup_coords = [geocode(s["address"]) or {"lat": 44.8125, "lng": 20.4612} for s in suppliers]
+    del_coords = [geocode(d["address"]) or {"lat": 44.8125, "lng": 20.4612} for d in deliveries]
 
-    missing_addr_orders = [o["name"] for o in raw_orders if not o.get("address", "").strip()]
-    if missing_addr_orders:
-        print(f"Kupci bez adrese (preskoceni): {missing_addr_orders}")
-
-    if not supplies_clean:
-        return {"status": "error", "message": "Mlekari nemaju unesene adrese u sistemu."}
-    if not orders_clean:
-        return {"status": "error", "message": f"Kupci nemaju unesene adrese. Preskoceni: {missing_addr_orders}"}
-
-    # ── KORAK 1: Spajamo narudžbine iste osobe ───────────────────────────────
-    orders_merged = merge_orders_by_address(orders_clean)
-    if not orders_merged:
-        return {"status": "error", "message": "Nema validnih narudžbina sa adresama."}
-
-    total_demand = round(sum(float(o.get("liters", 0)) for o in orders_merged), 1)
-    print(f"Ukupna tražnja: {total_demand}L od {len(orders_merged)} kupaca")
-
-    # ── KORAK 2: Geocodiranje SVIH adresa (mlekari + kupci) ───────────────
-    print("Geocodiram adrese...")
-    all_supply_coords   = [geocode_address(s.get("address", "")) for s in supplies_clean]
-    delivery_coords_raw = [geocode_address(o.get("address", "")) for o in orders_merged]
-
-    # Fallback koordinate (centar Beograda) ako geocoding ne uspe
-    FALLBACK = {"lat": 44.8125, "lng": 20.4612}
-    all_supply_coords = [c if c else FALLBACK for c in all_supply_coords]
-    delivery_coords   = [c if c else FALLBACK for c in delivery_coords_raw]
-
-    # ── KORAK 3: Matrica svih mlekara → svih kupaca (za selekciju) ────────
-    print("Računam matricu mlekari→kupci za selekciju...")
-    supply_to_delivery_matrix = None
-    if all_supply_coords and delivery_coords:
-        supply_to_delivery_matrix = get_distance_matrix(all_supply_coords, delivery_coords)
-
-    # Ako matrica nije dostupna, koristimo jednostavan fallback (redosled po kapacitetu)
-    if not supply_to_delivery_matrix:
-        supply_to_delivery_matrix = [
-            [999] * len(delivery_coords) for _ in all_supply_coords
-        ]
-
-    # ── KORAK 3b: Selekcija optimalnih mlekara ────────────────────────────
-    print("Selektujem optimalne mlekare...")
-    pickup_coords, supplies_selected = [], []
-
-    # Prolazimo kroz mlekare sortirane po blizini kupcima i uzimamo dok ne pokrijemo tražnju
-    valid_supplies = [
-        (i, s, all_supply_coords[i])
-        for i, s in enumerate(supplies_clean)
-        if float(s.get("liters", 0)) > 0
+    # 4. Matrica mlekari→kupci za selekciju
+    print("\n[4] Matrica mlekari->kupci...")
+    sel_coords  = sup_coords + del_coords
+    sel_matrix  = get_travel_matrix(sel_coords) or fallback_matrix(len(sel_coords))
+    n_sup_all   = len(sup_coords)
+    sup_to_del  = [
+        [sel_matrix[i][n_sup_all + j] for j in range(len(del_coords))]
+        for i in range(n_sup_all)
     ]
 
-    def avg_score(supply_idx):
-        row = supply_to_delivery_matrix[supply_idx]
-        good = [t for t in row if t < 99998]
-        return sum(good) / len(good) if good else float("inf")
+    # 5. Selekcija mlekara
+    print("\n[5] Selekcija mlekara...")
+    sel_suppliers, sel_sup_coords = select_suppliers(
+        suppliers, sup_coords, del_coords, total_demand, sup_to_del
+    )
+    if not sel_suppliers:
+        return {"status": "error", "message": "Nema dostupnog mleka za ovaj dan."}
 
-    sorted_supplies = sorted(valid_supplies, key=lambda x: avg_score(x[0]))
+    # Balans: ako je skupljeno vise nego sto treba, smanjujemo poslednjeg mlekara
+    collected = sum(s["liters"] for s in sel_suppliers)
+    if collected > total_demand + 0.01:
+        sel_suppliers[-1]["liters"] = round(sel_suppliers[-1]["liters"] - (collected - total_demand), 1)
 
-    collected = 0.0
-    for orig_idx, s, coord in sorted_supplies:
-        if collected >= total_demand:
-            break
-        needed    = total_demand - collected
-        available = float(s.get("liters", 0))
-        take      = min(available, needed)
-        s_copy    = dict(s)
-        s_copy["liters"] = round(take, 1)
-        supplies_selected.append(s_copy)
-        pickup_coords.append(coord)
-        collected += take
-        print(f"  ✓ '{s.get('name')}': {take:.1f}L (score={avg_score(orig_idx):.0f}s)")
+    # 6. Finalna matrica (selektovani mlekari + kupci)
+    print("\n[6] Finalna matrica za rutu...")
+    final_coords  = sel_sup_coords + del_coords
+    route_matrix  = get_travel_matrix(final_coords) or fallback_matrix(len(final_coords))
 
-    if not supplies_selected:
-        return {"status": "error", "message": "Nema mlekara sa dostupnim mlekom za ovaj dan."}
-
-    supplies = supplies_selected
-    orders   = orders_merged
-    balance_note = f"Selektovano {len(supplies)} mlekara, ukupno {collected:.1f}L za {total_demand:.1f}L tražnje."
-
-    # ── KORAK 4: Matrica odabranih mlekara + kupaca za optimizaciju rute ──
-    print("Računam Distance Matrix za rutu...")
-    all_coords  = pickup_coords + delivery_coords
-    full_matrix = get_distance_matrix(all_coords, all_coords)
-
-    def secs_to_min(s):
-        return round(s / 60)
-
-    if full_matrix:
-        n_pickup   = len(pickup_coords)
-        n_delivery = len(delivery_coords)
-
-        pickup_matrix = [
-            [full_matrix[i][j] for j in range(n_pickup)]
-            for i in range(n_pickup)
-        ]
-        delivery_matrix = [
-            [full_matrix[n_pickup + i][n_pickup + j] for j in range(n_delivery)]
-            for i in range(n_delivery)
-        ]
-        pickup_to_delivery = [
-            [full_matrix[i][n_pickup + j] for j in range(n_delivery)]
-            for i in range(n_pickup)
-        ]
-
-        pickup_order   = nearest_neighbor_order(pickup_coords, pickup_matrix)
-        delivery_order = nearest_neighbor_order(delivery_coords, delivery_matrix)
-
-        transit_pickup = [
-            secs_to_min(pickup_matrix[pickup_order[i]][pickup_order[i+1]])
-            for i in range(len(pickup_order) - 1)
-        ]
-        last_pickup_to_first_delivery = secs_to_min(
-            pickup_to_delivery[pickup_order[-1]][delivery_order[0]]
-        ) if pickup_order and delivery_order else 20
-
-        transit_delivery = [
-            secs_to_min(delivery_matrix[delivery_order[i]][delivery_order[i+1]])
-            for i in range(len(delivery_order) - 1)
-        ]
-    else:
-        # Fallback: prirodan redosled
-        pickup_order   = list(range(len(supplies)))
-        delivery_order = list(range(len(orders)))
-        transit_pickup = [15] * max(0, len(supplies) - 1)
-        transit_delivery = [15] * max(0, len(orders) - 1)
-        last_pickup_to_first_delivery = 20
-
-    # ── KORAK 4: Gradimo strukturu rute sa tačnim vremenima ───────────────
-    print("Gradim raspored vremena...")
-
-    START_HOUR = 7
-    SERVICE_MIN = 10  # minuta za utovar/istovar po stanici
-    current_sec = START_HOUR * 3600
-
-    def fmt(sec):
-        h = (sec // 3600) % 24
-        m = (sec % 3600) // 60
-        return f"{h:02d}:{m:02d}"
-
-    stops = []
-
-    # Pickup stanice
-    for step, idx in enumerate(pickup_order):
-        s = supplies[idx]
-        stops.append({
-            "type":    "pickup",
-            "name":    s.get("name", f"Mlekar {idx+1}"),
-            "address": s.get("address", ""),
-            "liters":  round(float(s.get("liters", 0)), 1),
-            "time":    fmt(current_sec),
-        })
-        current_sec += SERVICE_MIN * 60
-        if step < len(pickup_order) - 1:
-            travel_min = transit_pickup[step] if step < len(transit_pickup) else 20
-            current_sec += travel_min * 60  # realno vreme od Google Distance Matrix
-
-    # Tranzit od poslednjeg mlekara do prvog kupca
-    current_sec += last_pickup_to_first_delivery * 60
-
-    # Delivery stanice
-    for step, idx in enumerate(delivery_order):
-        o = orders[idx]
-        stops.append({
-            "type":    "delivery",
-            "name":    o.get("name", f"Kupac {idx+1}"),
-            "address": o.get("address", ""),
-            "liters":  round(float(o.get("liters", 0)), 1),
-            "time":    fmt(current_sec),
-        })
-        current_sec += SERVICE_MIN * 60
-        if step < len(delivery_order) - 1:
-            travel_min = transit_delivery[step] if step < len(transit_delivery) else 20
-            current_sec += travel_min * 60
-
-    # ── KORAK 5: AI samo pravi kratak komentar o ruti (ne menja brojeve!) ─
-    route_summary = json.dumps(stops, ensure_ascii=False)
-
-    system_prompt = """
-    Ti si AI asistent za kompaniju 'Mlečni put'. 
-    Ruta i sva vremena su već izračunati — NE menjaj ih.
-    Napiši kratak, prijatan komentar vozaču na srpskom (3-4 rečenice):
-    - Koliko stopa ima
-    - Ukupno litara za prevoz
-    - Procenu završetka radnog dana
-    - Eventualne napomene (npr. ako je došlo do korekcije litara)
-    Budi konkretan i human.
-    """
-
-    user_prompt = (
-        f"Ruta:\n{route_summary}\n\n"
-        f"Napomena o balansu: {balance_note}"
+    # 7. Gradimo rutu
+    print("\n[7] Gradim rutu...")
+    stops = build_route(
+        suppliers   = sel_suppliers,
+        sup_coords  = sel_sup_coords,
+        deliveries  = deliveries,
+        del_coords  = del_coords,
+        matrix      = route_matrix,
+        start_sec   = 7 * 3600,
+        service_sec = 10 * 60,
     )
 
+    print(f"\n  Finalna ruta ({len(stops)} stanica):")
+    for s in stops:
+        print(f"    {s['time']} [{s['type']:8}] {s['name']} — {s['liters']}L")
+
+    # 8. AI komentar
     try:
         ai_resp = client.chat.completions.create(
             model="gpt-4o",
+            max_tokens=200,
             messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_prompt},
-            ],
-            max_tokens=300,
+                {"role": "system", "content": (
+                    "Ti si asistent za 'Mlecni put'. Napisi kratak komentar vozacu "
+                    "na srpskom (2-3 recenice): koliko stanica, ukupno litara, "
+                    "kada priblizno zavrsava. NE menjaj rutu."
+                )},
+                {"role": "user", "content": json.dumps(stops, ensure_ascii=False)},
+            ]
         )
         comment = ai_resp.choices[0].message.content.strip()
     except Exception as e:
-        comment = f"Ruta uspešno generisana. ({e})"
-
-    # ── KORAK 6: Vraćamo rezultat ─────────────────────────────────────────
-    total_liters = sum(s["liters"] for s in stops if s["type"] == "pickup")
+        comment = f"Ruta sa {len(stops)} stanica uspesno generisana."
 
     return {
-        "status":        "success",
-        "route":         stops,
-        "total_liters":  round(total_liters, 1),
-        "balance_note":  balance_note,
-        "ai_comment":    comment,
-        "stops_count":   len(stops),
+        "status":       "success",
+        "route":        stops,
+        "total_liters": round(sum(s["liters"] for s in stops if s["type"] == "pickup"), 1),
+        "ai_comment":   comment,
+        "stops_count":  len(stops),
     }
 
 
-# ─────────────────────────────────────────────
-# PREDIKCIJA POTRAŽNJE (nepromenjena logika)
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+# PREDIKCIJA POTRAZNJE
+# ═══════════════════════════════════════════════════════════════
 
 @app.post("/api/predict-demand")
 async def predict_demand(payload: PredictionRequest):
-    print("--- AI PRAVI PREDIKCIJU POTRAŽNJE ---")
-
-    subs_str  = json.dumps(payload.subscriptions, ensure_ascii=False)
-    orders_str = json.dumps(payload.orders, ensure_ascii=False)
-
+    print("--- AI PRAVI PREDIKCIJU POTRAZNJE ---")
     system_prompt = """
-    Ti si AI analitičar za srpsku kompaniju 'Mlečni put'.
-    Na osnovu aktivnih pretplata predvidi potražnju za sledeću nedelju.
-
-    Tvoj odgovor MORA biti isključivo JSON:
+    Ti si AI analiticar za srpsku kompaniju 'Mlecni put'.
+    Na osnovu aktivnih pretplata predvidi potraznju za sledecu nedelju.
+    Tvoj odgovor MORA biti iskljucivo JSON:
     {
-        "weekly_forecast": [
-            {"day": "Ponedeljak", "liters": broj, "trend": "visok/srednji/nizak"}
-        ],
-        "peak_day": "dan sa najviše potražnje sledeće nedelje",
+        "weekly_forecast": [{"day": "Ponedeljak", "liters": broj, "trend": "visok/srednji/nizak"}],
+        "peak_day": "dan sa najvise potraznje",
         "peak_liters": broj,
         "change_percent": broj,
-        "farmer_message": "Poruka mlekaru na srpskom koliko da pripremi i kog dana",
-        "customer_prediction": "Kratka rečenica upozorenja na srpskom"
+        "farmer_message": "Poruka mlekaru na srpskom",
+        "customer_prediction": "Kratka recenica upozorenja na srpskom"
     }
     """
-
-    user_prompt = f"Aktivne pretplate: {subs_str}\nJednokratne narudžbine: {orders_str}"
-
+    user_prompt = (
+        f"Aktivne pretplate: {json.dumps(payload.subscriptions, ensure_ascii=False)}\n"
+        f"Jednokratne narudzibne: {json.dumps(payload.orders, ensure_ascii=False)}"
+    )
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -768,7 +460,6 @@ async def predict_demand(payload: PredictionRequest):
         )
         result = json.loads(response.choices[0].message.content)
         return {"status": "success", "prediction": result}
-
     except Exception as e:
-        print(f"Greška: {e}")
+        print(f"Greska: {e}")
         return {"status": "error", "message": str(e)}
