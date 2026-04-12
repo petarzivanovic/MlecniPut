@@ -106,62 +106,151 @@ def merge_by_address(orders: List[Dict]) -> List[Dict]:
 
 _geocache: Dict[str, Optional[Dict]] = {}
 
+# Slojevi koje smatramo dovoljno preciznim (ulica ili tacka)
+GOOD_LAYERS = {"address", "street", "venue", "intersection"}
+# Slojevi koje prihvatamo samo ako nemamo bolji rezultat
+WEAK_LAYERS = {"neighbourhood", "locality", "localadmin", "county", "region", "country"}
+
+CITY_MAP = {
+    "beograd": "Belgrade", "novi sad": "Novi Sad",
+    "nis": "Nis", "kragujevac": "Kragujevac",
+    "subotica": "Subotica", "zemun": "Belgrade",
+}
+
+# Mapa latinicnih slova na srpska dijakritička (za korisnike koji kucaju bez š,č,ć,đ,ž)
+LATIN_TO_SRB = str.maketrans({
+    "c": "č", "s": "š", "z": "ž",
+    "C": "Č", "S": "Š", "Z": "Ž",
+})
+# I obrnuto — sa dijakritika na latinicu (za ORS koji ponekad bolje radi bez)
+SRB_TO_LATIN = str.maketrans({
+    "č": "c", "ć": "c", "š": "s", "ž": "z", "đ": "dj",
+    "Č": "C", "Ć": "C", "Š": "S", "Ž": "Z", "Đ": "Dj",
+})
+
+def expand_address_variants(address: str) -> list:
+    """
+    Za datu adresu pravi varijante sa i bez dijakritika.
+    Primer: 'gramsijeva 4' → ['gramsijeva 4', 'gramšijeva 4', 'gramšijeva 4, Belgrade']
+    Primer: 'Gramšijeva 4' → ['Gramšijeva 4', 'Gramsijeva 4']
+    """
+    variants = [address]
+    # Varijanta sa dijakritikama (s→š, c→č, z→ž)
+    with_diacritics = address.translate(LATIN_TO_SRB)
+    if with_diacritics != address:
+        variants.append(with_diacritics)
+    # Varijanta bez dijakritika (š→s, č→c itd)
+    without_diacritics = address.translate(SRB_TO_LATIN)
+    if without_diacritics != address:
+        variants.append(without_diacritics)
+    return list(dict.fromkeys(variants))  # deduplikacija
+
+def _build_attempts(address: str) -> list:
+    """
+    Pravi listu varijanti adrese za probanje, od najpreciznijeg ka najmanje preciznom.
+    Ukljucuje varijante sa i bez dijakritika (š/s, č/c, ž/z, ć/c, đ/dj).
+    """
+    parts = [p.strip() for p in address.split(",")]
+    # Uklanjamo postanski broj
+    parts_nz = [p for p in parts if not (p.strip().isdigit() and len(p.strip()) == 5)]
+    # Mapiramo grad na engleski
+    parts_en = []
+    for p in parts_nz:
+        mapped = CITY_MAP.get(p.strip().lower())
+        parts_en.append(mapped if mapped else p.strip().title())
+
+    full_en   = ", ".join(parts_en)
+    full_orig = ", ".join(parts_nz)
+    only_street_en = ", ".join(parts_en[:2]) if len(parts_en) >= 2 else full_en
+
+    base_attempts = [full_en, full_orig, only_street_en]
+
+    # Za svaku bazu dodajemo varijante sa/bez dijakritika
+    all_attempts = []
+    for base in base_attempts:
+        all_attempts.extend(expand_address_variants(base))
+
+    return list(dict.fromkeys(all_attempts))  # deduplikacija, zadrzavamo redosled
+
+
+def _ors_geocode_attempt(query: str) -> Optional[tuple]:
+    """
+    Poziva ORS geocoding za jedan query.
+    Vraca (lat, lng, layer, confidence, label) ili None.
+    """
+    try:
+        r = requests.get(
+            "https://api.openrouteservice.org/geocode/search",
+            headers={"Authorization": ORS_API_KEY},
+            params={"text": query, "boundary.country": "RS", "size": 3},
+            timeout=6,
+        )
+        data = r.json()
+        if "error" in data:
+            print(f"  ORS auth greska: {data['error']}")
+            return None
+        features = data.get("features", [])
+        if not features:
+            return None
+
+        # Biramo prvi rezultat koji je u dobrom sloju
+        for f in features:
+            props = f.get("properties", {})
+            layer = props.get("layer", "")
+            conf  = props.get("confidence", 0)
+            label = props.get("label", query)[:70]
+            lng, lat = f["geometry"]["coordinates"]
+            if layer in GOOD_LAYERS:
+                return (lat, lng, layer, conf, label)
+
+        # Ako nema dobrog, uzimamo prvi bez obzira na sloj
+        f     = features[0]
+        props = f.get("properties", {})
+        lng, lat = f["geometry"]["coordinates"]
+        return (lat, lng, props.get("layer","?"), props.get("confidence",0), props.get("label",query)[:70])
+
+    except Exception as e:
+        print(f"  ORS greska za '{query}': {e}")
+        return None
+
+
 def geocode(address: str) -> Optional[Dict]:
     """
-    Geocoding koristeci ORS Geocoding API.
-    ORS radi na Render-u (isti API kljuc koji vec koristimo za Matrix).
+    Geocoding koristeci ORS API (radi na Render-u).
+    Proba vise varijanti adrese i bira najprecizaniji rezultat (po layer-u).
     """
     key = address.strip().lower()
     if key in _geocache:
         return _geocache[key]
 
-    # Cistimo adresu - uklanjamo postanski broj koji zbunjuje ORS
-    parts = [p.strip() for p in address.split(",")]
-    parts_clean = [p for p in parts if not (p.strip().isdigit() and len(p.strip()) == 5)]
-    # ORS bolje radi sa engleskim nazivom grada
-    city_map = {"beograd": "Belgrade", "novi sad": "Novi Sad", "nis": "Nis", "nisˈ": "Nis"}
-    parts_en = []
-    for p in parts_clean:
-        mapped = city_map.get(p.strip().lower())
-        parts_en.append(mapped if mapped else p.strip().title())
-    query = ", ".join(parts_en)
-
-    attempts = list(dict.fromkeys([query, address]))
+    attempts = _build_attempts(address)
+    best_result = None  # (lat, lng, layer, conf, label)
 
     for attempt in attempts:
-        try:
-            r = requests.get(
-                "https://api.openrouteservice.org/geocode/search",
-                headers={"Authorization": ORS_API_KEY},
-                params={
-                    "text": attempt,
-                    "boundary.country": "RS",
-                    "size": 1,
-                },
-                timeout=6,
-            )
-            data = r.json()
-            if "error" in data:
-                print(f"  ORS Geocoding auth greska: {data['error']}")
-                _geocache[key] = None
-                return None
-            features = data.get("features", [])
-            if features:
-                lng, lat = features[0]["geometry"]["coordinates"]
-                label = features[0].get("properties", {}).get("label", attempt)[:70]
-                # Proveravamo da li je rezultat samo grad (lose) ili ulica (dobro)
-                confidence = features[0].get("properties", {}).get("confidence", 0)
-                layer = features[0].get("properties", {}).get("layer", "")
-                print(f"  Geocoded '{address}' -> '{label}' ({lat:.5f}, {lng:.5f}) [{layer}, conf={confidence}]")
-                result = {"lat": lat, "lng": lng}
-                _geocache[key] = result
-                return result
-            else:
-                print(f"  ORS Geocoding: nema rezultata za '{attempt}'")
-        except Exception as e:
-            print(f"  ORS Geocoding greska '{attempt}': {e}")
+        res = _ors_geocode_attempt(attempt)
+        if res is None:
+            continue
+        lat, lng, layer, conf, label = res
+        print(f"  ORS '{attempt}' -> '{label}' ({lat:.5f},{lng:.5f}) [{layer} conf={conf}]")
 
-    print(f"  Geocoding NEUSPESNO za '{address}'")
+        if layer in GOOD_LAYERS:
+            # Nasli smo tacnu adresu, ne trebamo dalje traziti
+            result = {"lat": lat, "lng": lng}
+            _geocache[key] = result
+            print(f"  Geocoded '{address}' -> TACNO [{layer}]")
+            return result
+        elif best_result is None:
+            # Cuvamo kao fallback ali nastavljamo da trazimo bolji
+            best_result = res
+
+    if best_result:
+        lat, lng, layer, conf, label = best_result
+        result = {"lat": lat, "lng": lng}
+        _geocache[key] = result
+        print(f"  Geocoded '{address}' -> PRIBLIZNO [{layer}] upozorenje: nije tacna adresa")
+        return result
+
+    print(f"  Geocoding NEUSPESNO za '{address}' -> koristimo fallback")
     _geocache[key] = None
     return None
 
